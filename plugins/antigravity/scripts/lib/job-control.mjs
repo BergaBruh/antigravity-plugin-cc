@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import { getSessionRuntimeStatus } from "./codex.mjs";
+import { getSessionRuntimeStatus } from "./antigravity.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
@@ -51,11 +51,7 @@ function stripLogPrefix(line) {
 }
 
 function isProgressBlockTitle(line) {
-  return (
-    ["Final output", "Assistant message", "Reasoning summary", "Review output"].includes(line) ||
-    /^Subagent .+ message$/.test(line) ||
-    /^Subagent .+ reasoning summary$/.test(line)
-  );
+  return ["Final output", "agy final message", "agy stderr"].includes(line);
 }
 
 export function readJobProgressPreview(logFile, maxLines = DEFAULT_MAX_PROGRESS_LINES) {
@@ -100,12 +96,6 @@ function formatElapsedDuration(startValue, endValue = null) {
   return `${seconds}s`;
 }
 
-function looksLikeVerificationCommand(line) {
-  return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(
-    line
-  );
-}
-
 function inferLegacyJobPhase(job, progressPreview = []) {
   switch (job.status) {
     case "queued":
@@ -122,35 +112,18 @@ function inferLegacyJobPhase(job, progressPreview = []) {
 
   for (let index = progressPreview.length - 1; index >= 0; index -= 1) {
     const line = progressPreview[index].toLowerCase();
-    if (line.startsWith("starting codex") || line.startsWith("thread ready") || line.startsWith("turn started")) {
+    if (
+      line.startsWith("starting a new agy") ||
+      line.startsWith("continuing the most recent agy") ||
+      line.startsWith("resuming conversation") ||
+      line.startsWith("invoking agy")
+    ) {
       return "starting";
     }
-    if (line.startsWith("reviewer started") || line.includes("review mode")) {
-      return "reviewing";
-    }
-    if (line.startsWith("searching:") || line.startsWith("calling ") || line.startsWith("running tool:")) {
-      return "investigating";
-    }
-    if (line.startsWith("starting collaboration tool:")) {
-      return "investigating";
-    }
-    if (line.startsWith("running command:")) {
-      return looksLikeVerificationCommand(line)
-        ? "verifying"
-        : job.jobClass === "review"
-          ? "reviewing"
-          : "investigating";
-    }
-    if (line.startsWith("command completed:")) {
-      return looksLikeVerificationCommand(line) ? "verifying" : "running";
-    }
-    if (line.startsWith("applying ") || line.startsWith("file changes ")) {
-      return "editing";
-    }
-    if (line.startsWith("turn completed")) {
+    if (line.startsWith("final message captured")) {
       return "finalizing";
     }
-    if (line.startsWith("codex error:") || line.startsWith("failed:")) {
+    if (line.startsWith("agy run failed") || line.startsWith("agy exited")) {
       return "failed";
     }
   }
@@ -207,7 +180,7 @@ function matchJobReference(jobs, reference, predicate = () => true) {
     throw new Error(`Job reference "${reference}" is ambiguous. Use a longer job id.`);
   }
 
-  throw new Error(`No job found for "${reference}". Run /codex:status to list known jobs.`);
+  throw new Error(`No job found for "${reference}". Run /antigravity:status to list known jobs.`);
 }
 
 export function buildStatusSnapshot(cwd, options = {}) {
@@ -244,7 +217,7 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
   const selected = matchJobReference(jobs, reference);
   if (!selected) {
-    throw new Error(`No job found for "${reference}". Run /codex:status to inspect known jobs.`);
+    throw new Error(`No job found for "${reference}". Run /antigravity:status to inspect known jobs.`);
   }
 
   return {
@@ -268,14 +241,14 @@ export function resolveResultJob(cwd, reference) {
 
   const active = matchJobReference(jobs, reference, (job) => job.status === "queued" || job.status === "running");
   if (active) {
-    throw new Error(`Job ${active.id} is still ${active.status}. Check /codex:status and try again once it finishes.`);
+    throw new Error(`Job ${active.id} is still ${active.status}. Check /antigravity:status and try again once it finishes.`);
   }
 
   if (reference) {
-    throw new Error(`No finished job found for "${reference}". Run /codex:status to inspect active jobs.`);
+    throw new Error(`No finished job found for "${reference}". Run /antigravity:status to inspect active jobs.`);
   }
 
-  throw new Error("No finished Codex jobs found for this repository yet.");
+  throw new Error("No finished Antigravity jobs found for this repository yet.");
 }
 
 export function resolveCancelableJob(cwd, reference, options = {}) {
@@ -297,12 +270,12 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
     return { workspaceRoot, job: sessionScopedActiveJobs[0] };
   }
   if (sessionScopedActiveJobs.length > 1) {
-    throw new Error("Multiple Codex jobs are active. Pass a job id to /codex:cancel.");
+    throw new Error("Multiple Antigravity jobs are active. Pass a job id to /antigravity:cancel.");
   }
 
   if (getCurrentSessionId(options)) {
-    throw new Error("No active Codex jobs to cancel for this session.");
+    throw new Error("No active Antigravity jobs to cancel for this session.");
   }
 
-  throw new Error("No active Codex jobs to cancel.");
+  throw new Error("No active Antigravity jobs to cancel.");
 }

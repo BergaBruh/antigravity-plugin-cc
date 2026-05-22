@@ -1,85 +1,6 @@
-function severityRank(severity) {
-  switch (severity) {
-    case "critical":
-      return 0;
-    case "high":
-      return 1;
-    case "medium":
-      return 2;
-    default:
-      return 3;
-  }
-}
-
-function formatLineRange(finding) {
-  if (!finding.line_start) {
-    return "";
-  }
-  if (!finding.line_end || finding.line_end === finding.line_start) {
-    return `:${finding.line_start}`;
-  }
-  return `:${finding.line_start}-${finding.line_end}`;
-}
-
-function validateReviewResultShape(data) {
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return "Expected a top-level JSON object.";
-  }
-  if (typeof data.verdict !== "string" || !data.verdict.trim()) {
-    return "Missing string `verdict`.";
-  }
-  if (typeof data.summary !== "string" || !data.summary.trim()) {
-    return "Missing string `summary`.";
-  }
-  if (!Array.isArray(data.findings)) {
-    return "Missing array `findings`.";
-  }
-  if (!Array.isArray(data.next_steps)) {
-    return "Missing array `next_steps`.";
-  }
-  return null;
-}
-
-function normalizeReviewFinding(finding, index) {
-  const source = finding && typeof finding === "object" && !Array.isArray(finding) ? finding : {};
-  const lineStart = Number.isInteger(source.line_start) && source.line_start > 0 ? source.line_start : null;
-  const lineEnd =
-    Number.isInteger(source.line_end) && source.line_end > 0 && (!lineStart || source.line_end >= lineStart)
-      ? source.line_end
-      : lineStart;
-
-  return {
-    severity: typeof source.severity === "string" && source.severity.trim() ? source.severity.trim() : "low",
-    title: typeof source.title === "string" && source.title.trim() ? source.title.trim() : `Finding ${index + 1}`,
-    body: typeof source.body === "string" && source.body.trim() ? source.body.trim() : "No details provided.",
-    file: typeof source.file === "string" && source.file.trim() ? source.file.trim() : "unknown",
-    line_start: lineStart,
-    line_end: lineEnd,
-    recommendation: typeof source.recommendation === "string" ? source.recommendation.trim() : ""
-  };
-}
-
-function normalizeReviewResultData(data) {
-  return {
-    verdict: data.verdict.trim(),
-    summary: data.summary.trim(),
-    findings: data.findings.map((finding, index) => normalizeReviewFinding(finding, index)),
-    next_steps: data.next_steps
-      .filter((step) => typeof step === "string" && step.trim())
-      .map((step) => step.trim())
-  };
-}
-
-function isStructuredReviewStoredResult(storedJob) {
-  const result = storedJob?.result;
-  if (!result || typeof result !== "object" || Array.isArray(result)) {
-    return false;
-  }
-  return (
-    Object.prototype.hasOwnProperty.call(result, "result") ||
-    Object.prototype.hasOwnProperty.call(result, "parseError")
-  );
-}
+// Renderers for /antigravity:* output. agy does not emit structured JSON,
+// reasoning summaries, or file-change manifests, so the renderers here are
+// intentionally simpler than the Codex originals.
 
 function formatJobLine(job) {
   const parts = [job.id, `${job.status || "unknown"}`];
@@ -99,21 +20,21 @@ function escapeMarkdownCell(value) {
     .trim();
 }
 
-function formatCodexResumeCommand(job) {
+function formatAgyResumeCommand(job) {
   if (!job?.threadId) {
     return null;
   }
-  return `codex resume ${job.threadId}`;
+  return `agy --conversation ${job.threadId}`;
 }
 
 function appendActiveJobsTable(lines, jobs) {
   lines.push("Active jobs:");
-  lines.push("| Job | Kind | Status | Phase | Elapsed | Codex Session ID | Summary | Actions |");
+  lines.push("| Job | Kind | Status | Phase | Elapsed | Agy Conversation ID | Summary | Actions |");
   lines.push("| --- | --- | --- | --- | --- | --- | --- | --- |");
   for (const job of jobs) {
-    const actions = [`/codex:status ${job.id}`];
+    const actions = [`/antigravity:status ${job.id}`];
     if (job.status === "queued" || job.status === "running") {
-      actions.push(`/codex:cancel ${job.id}`);
+      actions.push(`/antigravity:cancel ${job.id}`);
     }
     lines.push(
       `| ${escapeMarkdownCell(job.id)} | ${escapeMarkdownCell(job.kindLabel)} | ${escapeMarkdownCell(job.status)} | ${escapeMarkdownCell(job.phase ?? "")} | ${escapeMarkdownCell(job.elapsed ?? "")} | ${escapeMarkdownCell(job.threadId ?? "")} | ${escapeMarkdownCell(job.summary ?? "")} | ${actions.map((action) => `\`${action}\``).join("<br>")} |`
@@ -136,24 +57,29 @@ function pushJobDetails(lines, job, options = {}) {
     lines.push(`  Duration: ${job.duration}`);
   }
   if (job.threadId) {
-    lines.push(`  Codex session ID: ${job.threadId}`);
+    lines.push(`  Agy conversation ID: ${job.threadId}`);
   }
-  const resumeCommand = formatCodexResumeCommand(job);
+  const resumeCommand = formatAgyResumeCommand(job);
   if (resumeCommand) {
-    lines.push(`  Resume in Codex: ${resumeCommand}`);
+    lines.push(`  Resume in agy: ${resumeCommand}`);
   }
   if (job.logFile && options.showLog) {
     lines.push(`  Log: ${job.logFile}`);
   }
   if ((job.status === "queued" || job.status === "running") && options.showCancelHint) {
-    lines.push(`  Cancel: /codex:cancel ${job.id}`);
+    lines.push(`  Cancel: /antigravity:cancel ${job.id}`);
   }
   if (job.status !== "queued" && job.status !== "running" && options.showResultHint) {
-    lines.push(`  Result: /codex:result ${job.id}`);
+    lines.push(`  Result: /antigravity:result ${job.id}`);
   }
-  if (job.status !== "queued" && job.status !== "running" && job.jobClass === "task" && job.write && options.showReviewHint) {
-    lines.push("  Review changes: /codex:review --wait");
-    lines.push("  Stricter review: /codex:adversarial-review --wait");
+  if (
+    job.status !== "queued" &&
+    job.status !== "running" &&
+    job.jobClass === "task" &&
+    options.showReviewHint
+  ) {
+    lines.push("  Review changes: /antigravity:review --wait");
+    lines.push("  Stricter review: /antigravity:adversarial-review --wait");
   }
   if (job.progressPreview?.length) {
     lines.push("  Progress:");
@@ -163,30 +89,18 @@ function pushJobDetails(lines, job, options = {}) {
   }
 }
 
-function appendReasoningSection(lines, reasoningSummary) {
-  if (!Array.isArray(reasoningSummary) || reasoningSummary.length === 0) {
-    return;
-  }
-
-  lines.push("", "Reasoning:");
-  for (const section of reasoningSummary) {
-    lines.push(`- ${section}`);
-  }
-}
-
 export function renderSetupReport(report) {
   const lines = [
-    "# Codex Setup",
+    "# Antigravity Setup",
     "",
     `Status: ${report.ready ? "ready" : "needs attention"}`,
     "",
     "Checks:",
     `- node: ${report.node.detail}`,
-    `- npm: ${report.npm.detail}`,
-    `- codex: ${report.codex.detail}`,
+    `- agy: ${report.agy.detail}`,
     `- auth: ${report.auth.detail}`,
     `- session runtime: ${report.sessionRuntime.label}`,
-    `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    `- review gate: ${report.reviewGateEnabled ? "enabled (experimental)" : "disabled"}`,
     ""
   ];
 
@@ -208,126 +122,45 @@ export function renderSetupReport(report) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-export function renderReviewResult(parsedResult, meta) {
-  if (!parsedResult.parsed) {
-    const lines = [
-      `# Codex ${meta.reviewLabel}`,
-      "",
-      "Codex did not return valid structured JSON.",
-      "",
-      `- Parse error: ${parsedResult.parseError}`
-    ];
-
-    if (parsedResult.rawOutput) {
-      lines.push("", "Raw final message:", "", "```text", parsedResult.rawOutput, "```");
-    }
-
-    appendReasoningSection(lines, meta.reasoningSummary ?? parsedResult.reasoningSummary);
-
-    return `${lines.join("\n").trimEnd()}\n`;
-  }
-
-  const validationError = validateReviewResultShape(parsedResult.parsed);
-  if (validationError) {
-    const lines = [
-      `# Codex ${meta.reviewLabel}`,
-      "",
-      `Target: ${meta.targetLabel}`,
-      "Codex returned JSON with an unexpected review shape.",
-      "",
-      `- Validation error: ${validationError}`
-    ];
-
-    if (parsedResult.rawOutput) {
-      lines.push("", "Raw final message:", "", "```text", parsedResult.rawOutput, "```");
-    }
-
-    appendReasoningSection(lines, meta.reasoningSummary ?? parsedResult.reasoningSummary);
-
-    return `${lines.join("\n").trimEnd()}\n`;
-  }
-
-  const data = normalizeReviewResultData(parsedResult.parsed);
-  const findings = [...data.findings].sort((left, right) => severityRank(left.severity) - severityRank(right.severity));
-  const lines = [
-    `# Codex ${meta.reviewLabel}`,
-    "",
-    `Target: ${meta.targetLabel}`,
-    `Verdict: ${data.verdict}`,
-    "",
-    data.summary,
-    ""
-  ];
-
-  if (findings.length === 0) {
-    lines.push("No material findings.");
-  } else {
-    lines.push("Findings:");
-    for (const finding of findings) {
-      const lineSuffix = formatLineRange(finding);
-      lines.push(`- [${finding.severity}] ${finding.title} (${finding.file}${lineSuffix})`);
-      lines.push(`  ${finding.body}`);
-      if (finding.recommendation) {
-        lines.push(`  Recommendation: ${finding.recommendation}`);
-      }
-    }
-  }
-
-  if (data.next_steps.length > 0) {
-    lines.push("", "Next steps:");
-    for (const step of data.next_steps) {
-      lines.push(`- ${step}`);
-    }
-  }
-
-  appendReasoningSection(lines, meta.reasoningSummary);
-
-  return `${lines.join("\n").trimEnd()}\n`;
-}
-
-export function renderNativeReviewResult(result, meta) {
-  const stdout = result.stdout.trim();
-  const stderr = result.stderr.trim();
-  const lines = [
-    `# Codex ${meta.reviewLabel}`,
-    "",
-    `Target: ${meta.targetLabel}`,
-    ""
-  ];
+// agy returns plain text. We present it as-is under a review header so
+// users can see the target context but the actual content is untouched.
+export function renderReviewResult(result, meta) {
+  const stdout = String(result?.stdout ?? "").trim();
+  const stderr = String(result?.stderr ?? "").trim();
+  const lines = [`# Antigravity ${meta.reviewLabel}`, "", `Target: ${meta.targetLabel}`, ""];
 
   if (stdout) {
     lines.push(stdout);
-  } else if (result.status === 0) {
-    lines.push("Codex review completed without any stdout output.");
+  } else if (result?.status === 0) {
+    lines.push("agy review completed without any stdout output.");
   } else {
-    lines.push("Codex review failed.");
+    lines.push("agy review failed.");
   }
 
   if (stderr) {
     lines.push("", "stderr:", "", "```text", stderr, "```");
   }
 
-  appendReasoningSection(lines, meta.reasoningSummary);
-
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-export function renderTaskResult(parsedResult, meta) {
+export function renderTaskResult(parsedResult /* , meta */) {
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
   if (rawOutput) {
     return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
   }
 
-  const message = String(parsedResult?.failureMessage ?? "").trim() || "Codex did not return a final message.";
+  const message =
+    String(parsedResult?.failureMessage ?? "").trim() || "agy did not return a final message.";
   return `${message}\n`;
 }
 
 export function renderStatusReport(report) {
   const lines = [
-    "# Codex Status",
+    "# Antigravity Status",
     "",
     `Session runtime: ${report.sessionRuntime.label}`,
-    `Review gate: ${report.config.stopReviewGate ? "enabled" : "disabled"}`,
+    `Review gate: ${report.config.stopReviewGate ? "enabled (experimental)" : "disabled"}`,
     ""
   ];
 
@@ -367,15 +200,17 @@ export function renderStatusReport(report) {
   }
 
   if (report.needsReview) {
-    lines.push("The stop-time review gate is enabled.");
-    lines.push("Ending the session will trigger a fresh Codex adversarial review and block if it finds issues.");
+    lines.push("The stop-time review gate is enabled (experimental).");
+    lines.push(
+      "Ending the session will trigger a fresh agy review and block if the first line of the response starts with `BLOCK:`."
+    );
   }
 
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
 export function renderJobStatusReport(job) {
-  const lines = ["# Codex Job Status", ""];
+  const lines = ["# Antigravity Job Status", ""];
   pushJobDetails(lines, job, {
     showElapsed: job.status === "queued" || job.status === "running",
     showDuration: job.status !== "queued" && job.status !== "running",
@@ -389,25 +224,19 @@ export function renderJobStatusReport(job) {
 
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
-  const resumeCommand = threadId ? `codex resume ${threadId}` : null;
-  if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
-    const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
-    if (!threadId) {
-      return output;
-    }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
-  }
+  const resumeCommand = threadId ? `agy --conversation ${threadId}` : null;
 
   const rawOutput =
     (typeof storedJob?.result?.rawOutput === "string" && storedJob.result.rawOutput) ||
-    (typeof storedJob?.result?.codex?.stdout === "string" && storedJob.result.codex.stdout) ||
+    (typeof storedJob?.result?.agy?.stdout === "string" && storedJob.result.agy.stdout) ||
     "";
+
   if (rawOutput) {
     const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
     if (!threadId) {
       return output;
     }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return `${output}\nAgy conversation ID: ${threadId}\nResume in agy: ${resumeCommand}\n`;
   }
 
   if (storedJob?.rendered) {
@@ -415,19 +244,14 @@ export function renderStoredJobResult(job, storedJob) {
     if (!threadId) {
       return output;
     }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return `${output}\nAgy conversation ID: ${threadId}\nResume in agy: ${resumeCommand}\n`;
   }
 
-  const lines = [
-    `# ${job.title ?? "Codex Result"}`,
-    "",
-    `Job: ${job.id}`,
-    `Status: ${job.status}`
-  ];
+  const lines = [`# ${job.title ?? "Antigravity Result"}`, "", `Job: ${job.id}`, `Status: ${job.status}`];
 
   if (threadId) {
-    lines.push(`Codex session ID: ${threadId}`);
-    lines.push(`Resume in Codex: ${resumeCommand}`);
+    lines.push(`Agy conversation ID: ${threadId}`);
+    lines.push(`Resume in agy: ${resumeCommand}`);
   }
 
   if (job.summary) {
@@ -446,12 +270,7 @@ export function renderStoredJobResult(job, storedJob) {
 }
 
 export function renderCancelReport(job) {
-  const lines = [
-    "# Codex Cancel",
-    "",
-    `Cancelled ${job.id}.`,
-    ""
-  ];
+  const lines = ["# Antigravity Cancel", "", `Cancelled ${job.id}.`, ""];
 
   if (job.title) {
     lines.push(`- Title: ${job.title}`);
@@ -459,7 +278,7 @@ export function renderCancelReport(job) {
   if (job.summary) {
     lines.push(`- Summary: ${job.summary}`);
   }
-  lines.push("- Check `/codex:status` for the updated queue.");
+  lines.push("- Check `/antigravity:status` for the updated queue.");
 
   return `${lines.join("\n").trimEnd()}\n`;
 }

@@ -1,12 +1,21 @@
 #!/usr/bin/env node
 
+// EXPERIMENTAL stop-time review gate.
+//
+// The Codex version of this hook relied on JSON-RPC + structured output to
+// reliably classify "ALLOW" vs "BLOCK". agy has no structured output, so we
+// parse text instead: the first line of agy's response must start with
+// `ALLOW:` or `BLOCK:`. This is more fragile and is more exposed to prompt
+// injection from whatever the previous Claude turn wrote. Treat it as best
+// effort.
+
 import fs from "node:fs";
 import process from "node:process";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { getCodexAvailability } from "./lib/codex.mjs";
+import { getAgyAvailability } from "./lib/antigravity.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { getConfig, listJobs } from "./lib/state.mjs";
 import { sortJobsNewestFirst } from "./lib/job-control.mjs";
@@ -16,7 +25,6 @@ import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 const STOP_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
-const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
 function readHookInput() {
   const raw = fs.readFileSync(0, "utf8").trim();
@@ -57,13 +65,13 @@ function buildStopReviewPrompt(input = {}) {
 }
 
 function buildSetupNote(cwd) {
-  const availability = getCodexAvailability(cwd);
+  const availability = getAgyAvailability(cwd);
   if (availability.available) {
     return null;
   }
 
   const detail = availability.detail ? ` ${availability.detail}.` : "";
-  return `Codex is not set up for the review gate.${detail} Run /codex:setup.`;
+  return `agy is not set up for the review gate.${detail} Run /antigravity:setup.`;
 }
 
 function parseStopReviewOutput(rawOutput) {
@@ -72,7 +80,7 @@ function parseStopReviewOutput(rawOutput) {
     return {
       ok: false,
       reason:
-        "The stop-time Codex review task returned no final output. Run /codex:review --wait manually or bypass the gate."
+        "The stop-time agy review returned no final output. Run /antigravity:review --wait manually or disable the gate."
     };
   }
 
@@ -84,19 +92,19 @@ function parseStopReviewOutput(rawOutput) {
     const reason = firstLine.slice("BLOCK:".length).trim() || text;
     return {
       ok: false,
-      reason: `Codex stop-time review found issues that still need fixes before ending the session: ${reason}`
+      reason: `agy stop-time review found issues that still need fixes before ending the session: ${reason}`
     };
   }
 
   return {
     ok: false,
     reason:
-      "The stop-time Codex review task returned an unexpected answer. Run /codex:review --wait manually or bypass the gate."
+      "The stop-time agy review returned an unexpected answer (no ALLOW:/BLOCK: prefix). Run /antigravity:review --wait manually or disable the gate."
   };
 }
 
 function runStopReview(cwd, input = {}) {
-  const scriptPath = path.join(SCRIPT_DIR, "codex-companion.mjs");
+  const scriptPath = path.join(SCRIPT_DIR, "antigravity-companion.mjs");
   const prompt = buildStopReviewPrompt(input);
   const childEnv = {
     ...process.env,
@@ -113,7 +121,7 @@ function runStopReview(cwd, input = {}) {
     return {
       ok: false,
       reason:
-        "The stop-time Codex review task timed out after 15 minutes. Run /codex:review --wait manually or bypass the gate."
+        "The stop-time agy review timed out after 15 minutes. Run /antigravity:review --wait manually or disable the gate."
     };
   }
 
@@ -122,8 +130,8 @@ function runStopReview(cwd, input = {}) {
     return {
       ok: false,
       reason: detail
-        ? `The stop-time Codex review task failed: ${detail}`
-        : "The stop-time Codex review task failed. Run /codex:review --wait manually or bypass the gate."
+        ? `The stop-time agy review failed: ${detail}`
+        : "The stop-time agy review failed. Run /antigravity:review --wait manually or disable the gate."
     };
   }
 
@@ -134,7 +142,7 @@ function runStopReview(cwd, input = {}) {
     return {
       ok: false,
       reason:
-        "The stop-time Codex review task returned invalid JSON. Run /codex:review --wait manually or bypass the gate."
+        "The stop-time agy review returned invalid JSON. Run /antigravity:review --wait manually or disable the gate."
     };
   }
 }
@@ -148,7 +156,7 @@ function main() {
   const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), input));
   const runningJob = jobs.find((job) => job.status === "queued" || job.status === "running");
   const runningTaskNote = runningJob
-    ? `Codex task ${runningJob.id} is still running. Check /codex:status and use /codex:cancel ${runningJob.id} if you want to stop it before ending the session.`
+    ? `Antigravity task ${runningJob.id} is still running. Check /antigravity:status and use /antigravity:cancel ${runningJob.id} if you want to stop it before ending the session.`
     : null;
 
   if (!config.stopReviewGate) {

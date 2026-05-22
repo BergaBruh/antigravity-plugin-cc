@@ -1,87 +1,49 @@
 /**
- * @typedef {import("./app-server-protocol").AppServerNotification} AppServerNotification
- * @typedef {import("./app-server-protocol").ReviewTarget} ReviewTarget
- * @typedef {import("./app-server-protocol").ThreadItem} ThreadItem
- * @typedef {import("./app-server-protocol").ThreadResumeParams} ThreadResumeParams
- * @typedef {import("./app-server-protocol").ThreadStartParams} ThreadStartParams
- * @typedef {import("./app-server-protocol").Turn} Turn
- * @typedef {import("./app-server-protocol").UserInput} UserInput
+ * Subprocess wrapper for Google's Antigravity CLI (`agy`).
+ *
+ * The original Codex plugin used `codex app-server`, which exposed a
+ * streaming JSON-RPC protocol with structured items, reasoning summaries,
+ * file-change manifests, and a shared broker. `agy` exposes none of that:
+ * the only programmatic surface is `agy --print` (a one-shot prompt that
+ * writes the final assistant message to stdout) plus `--continue` /
+ * `--conversation <id>` for resume.
+ *
+ * Consequence: many capabilities of the old plugin are simply not available
+ * here. We model a single "turn" as one `agy --print` subprocess and expose
+ * a roughly compatible API (`runAgyTurn`, `runAgyReview`, `interruptAgyTurn`,
+ * `findLatestTaskThread`) so the companion script and renderers can stay
+ * structurally similar. Fields we cannot populate (turnId, reasoningSummary,
+ * fileChanges, commandExecutions) are returned empty.
+ *
  * @typedef {((update: string | { message: string, phase: string | null, threadId?: string | null, turnId?: string | null, stderrMessage?: string | null, logTitle?: string | null, logBody?: string | null }) => void)} ProgressReporter
- * @typedef {{
- *   threadId: string,
- *   rootThreadId: string,
- *   threadIds: Set<string>,
- *   threadTurnIds: Map<string, string>,
- *   threadLabels: Map<string, string>,
- *   turnId: string | null,
- *   bufferedNotifications: AppServerNotification[],
- *   completion: Promise<TurnCaptureState>,
- *   resolveCompletion: (state: TurnCaptureState) => void,
- *   rejectCompletion: (error: unknown) => void,
- *   finalTurn: Turn | null,
- *   completed: boolean,
- *   finalAnswerSeen: boolean,
- *   pendingCollaborations: Set<string>,
- *   activeSubagentTurns: Set<string>,
- *   completionTimer: ReturnType<typeof setTimeout> | null,
- *   lastAgentMessage: string,
- *   reviewText: string,
- *   reasoningSummary: string[],
- *   error: unknown,
- *   messages: Array<{ lifecycle: string, phase: string | null, text: string }>,
- *   fileChanges: ThreadItem[],
- *   commandExecutions: ThreadItem[],
- *   onProgress: ProgressReporter | null
- * }} TurnCaptureState
  */
-import { readJsonFile } from "./fs.mjs";
-import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
-import { loadBrokerSession } from "./broker-lifecycle.mjs";
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
 import { binaryAvailable } from "./process.mjs";
 
-const SERVICE_NAME = "claude_code_codex_plugin";
-const TASK_THREAD_PREFIX = "Codex Companion Task";
+const TASK_THREAD_PREFIX = "Antigravity Companion Task";
 const DEFAULT_CONTINUE_PROMPT =
-  "Continue from the current thread state. Pick the next highest-value step and follow through until the task is resolved.";
+  "Continue from the current conversation state. Pick the next highest-value step and follow through until the task is resolved.";
+const AGY_BINARY = "agy";
+const AGY_PRINT_TIMEOUT_DEFAULT = "30m"; // generous; agy's own default is 5m.
+const CONVERSATION_DIR_CANDIDATES = [
+  path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations"),
+  path.join(os.homedir(), ".agy", "conversations")
+];
 
-function cleanCodexStderr(stderr) {
-  return stderr
+function cleanAgyStderr(stderr) {
+  return String(stderr ?? "")
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
-    .filter((line) => line && !line.startsWith("WARNING: proceeding, even though we could not update PATH:"))
+    .filter((line) => line && !/^\s*$/.test(line))
     .join("\n");
 }
 
-/** @returns {ThreadStartParams} */
-function buildThreadParams(cwd, options = {}) {
-  return {
-    cwd,
-    model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only",
-    serviceName: SERVICE_NAME,
-    ephemeral: options.ephemeral ?? true,
-    experimentalRawEvents: false
-  };
-}
-
-/** @returns {ThreadResumeParams} */
-function buildResumeParams(threadId, cwd, options = {}) {
-  return {
-    threadId,
-    cwd,
-    model: options.model ?? null,
-    approvalPolicy: options.approvalPolicy ?? "never",
-    sandbox: options.sandbox ?? "read-only"
-  };
-}
-
-/** @returns {UserInput[]} */
-function buildTurnInput(prompt) {
-  return [{ type: "text", text: prompt, text_elements: [] }];
-}
-
-function shorten(text, limit = 72) {
+function shorten(text, limit = 56) {
   const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
   if (!normalized) {
     return "";
@@ -92,96 +54,11 @@ function shorten(text, limit = 72) {
   return `${normalized.slice(0, limit - 3)}...`;
 }
 
-function looksLikeVerificationCommand(command) {
-  return /\b(test|tests|lint|build|typecheck|type-check|check|verify|validate|pytest|jest|vitest|cargo test|npm test|pnpm test|yarn test|go test|mvn test|gradle test|tsc|eslint|ruff)\b/i.test(
-    command
-  );
-}
-
 function buildTaskThreadName(prompt) {
   const excerpt = shorten(prompt, 56);
   return excerpt ? `${TASK_THREAD_PREFIX}: ${excerpt}` : TASK_THREAD_PREFIX;
 }
 
-function extractThreadId(message) {
-  return message?.params?.threadId ?? null;
-}
-
-function extractTurnId(message) {
-  if (message?.params?.turnId) {
-    return message.params.turnId;
-  }
-  if (message?.params?.turn?.id) {
-    return message.params.turn.id;
-  }
-  return null;
-}
-
-function collectTouchedFiles(fileChanges) {
-  const paths = new Set();
-  for (const fileChange of fileChanges) {
-    for (const change of fileChange.changes ?? []) {
-      if (change.path) {
-        paths.add(change.path);
-      }
-    }
-  }
-  return [...paths];
-}
-
-function normalizeReasoningText(text) {
-  return String(text ?? "").replace(/\s+/g, " ").trim();
-}
-
-function extractReasoningSections(value) {
-  if (!value) {
-    return [];
-  }
-
-  if (typeof value === "string") {
-    const normalized = normalizeReasoningText(value);
-    return normalized ? [normalized] : [];
-  }
-
-  if (Array.isArray(value)) {
-    return value.flatMap((entry) => extractReasoningSections(entry));
-  }
-
-  if (typeof value === "object") {
-    if (typeof value.text === "string") {
-      return extractReasoningSections(value.text);
-    }
-    if ("summary" in value) {
-      return extractReasoningSections(value.summary);
-    }
-    if ("content" in value) {
-      return extractReasoningSections(value.content);
-    }
-    if ("parts" in value) {
-      return extractReasoningSections(value.parts);
-    }
-  }
-
-  return [];
-}
-
-function mergeReasoningSections(existingSections, nextSections) {
-  const merged = [];
-  for (const section of [...existingSections, ...nextSections]) {
-    const normalized = normalizeReasoningText(section);
-    if (!normalized || merged.includes(normalized)) {
-      continue;
-    }
-    merged.push(normalized);
-  }
-  return merged;
-}
-
-/**
- * @param {ProgressReporter | null | undefined} onProgress
- * @param {string | null | undefined} message
- * @param {string | null | undefined} [phase]
- */
 function emitProgress(onProgress, message, phase = null, extra = {}) {
   if (!onProgress || !message) {
     return;
@@ -197,7 +74,6 @@ function emitLogEvent(onProgress, options = {}) {
   if (!onProgress) {
     return;
   }
-
   onProgress({
     message: options.message ?? "",
     phase: options.phase ?? null,
@@ -207,882 +83,411 @@ function emitLogEvent(onProgress, options = {}) {
   });
 }
 
-function labelForThread(state, threadId) {
-  if (!threadId || threadId === state.rootThreadId || threadId === state.threadId) {
+/**
+ * Detect the most recently written agy conversation `.pb` file. We cannot
+ * read its contents (protobuf, undocumented schema), but the UUID-named
+ * file is exactly the conversation ID we'd pass to `--conversation`.
+ * Returns `null` if no conversations directory is found.
+ */
+function snapshotLatestConversationFile() {
+  for (const dir of CONVERSATION_DIR_CANDIDATES) {
+    if (!fs.existsSync(dir)) {
+      continue;
+    }
+    try {
+      const entries = fs.readdirSync(dir).filter((name) => name.endsWith(".pb"));
+      if (entries.length === 0) {
+        continue;
+      }
+      const stats = entries
+        .map((name) => {
+          const filePath = path.join(dir, name);
+          try {
+            return { filePath, name, mtimeMs: fs.statSync(filePath).mtimeMs };
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+      if (stats.length === 0) {
+        continue;
+      }
+      stats.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      return stats[0];
+    } catch {
+      // ignore directory read failures
+    }
+  }
+  return null;
+}
+
+function deriveConversationIdFromFile(file) {
+  if (!file) {
     return null;
   }
-  return state.threadLabels.get(threadId) ?? threadId;
+  const base = path.basename(file.name, ".pb");
+  return base && /^[a-z0-9-]+$/i.test(base) ? base : null;
 }
 
-function registerThread(state, threadId, options = {}) {
-  if (!threadId) {
-    return;
+function detectConversationIdAfter(beforeFile) {
+  const after = snapshotLatestConversationFile();
+  if (!after) {
+    return null;
   }
-
-  state.threadIds.add(threadId);
-  const label =
-    options.threadName ??
-    options.name ??
-    options.agentNickname ??
-    options.agentRole ??
-    state.threadLabels.get(threadId) ??
-    null;
-  if (label) {
-    state.threadLabels.set(threadId, label);
+  if (beforeFile && after.filePath === beforeFile.filePath && after.mtimeMs === beforeFile.mtimeMs) {
+    return null;
   }
+  return deriveConversationIdFromFile(after);
 }
 
-function describeStartedItem(state, item) {
-  switch (item.type) {
-    case "enteredReviewMode":
-      return { message: `Reviewer started: ${item.review}`, phase: "reviewing" };
-    case "commandExecution":
-      return {
-        message: `Running command: ${shorten(item.command, 96)}`,
-        phase: looksLikeVerificationCommand(item.command) ? "verifying" : "running"
-      };
-    case "fileChange":
-      return { message: `Applying ${item.changes.length} file change(s).`, phase: "editing" };
-    case "mcpToolCall":
-      return { message: `Calling ${item.server}/${item.tool}.`, phase: "investigating" };
-    case "dynamicToolCall":
-      return { message: `Running tool: ${item.tool}.`, phase: "investigating" };
-    case "collabAgentToolCall": {
-      const subagents = (item.receiverThreadIds ?? []).map((threadId) => labelForThread(state, threadId) ?? threadId);
-      const summary =
-        subagents.length > 0
-          ? `Starting subagent ${subagents.join(", ")} via collaboration tool: ${item.tool}.`
-          : `Starting collaboration tool: ${item.tool}.`;
-      return { message: summary, phase: "investigating" };
-    }
-    case "webSearch":
-      return { message: `Searching: ${shorten(item.query, 96)}`, phase: "investigating" };
-    default:
-      return null;
-  }
-}
-
-function describeCompletedItem(state, item) {
-  switch (item.type) {
-    case "commandExecution": {
-      const exitCode = item.exitCode ?? "?";
-      const statusLabel = item.status === "completed" ? "completed" : item.status;
-      return {
-        message: `Command ${statusLabel}: ${shorten(item.command, 96)} (exit ${exitCode})`,
-        phase: looksLikeVerificationCommand(item.command) ? "verifying" : "running"
-      };
-    }
-    case "fileChange":
-      return { message: `File changes ${item.status}.`, phase: "editing" };
-    case "mcpToolCall":
-      return { message: `Tool ${item.server}/${item.tool} ${item.status}.`, phase: "investigating" };
-    case "dynamicToolCall":
-      return { message: `Tool ${item.tool} ${item.status}.`, phase: "investigating" };
-    case "collabAgentToolCall": {
-      const subagents = (item.receiverThreadIds ?? []).map((threadId) => labelForThread(state, threadId) ?? threadId);
-      const summary =
-        subagents.length > 0
-          ? `Subagent ${subagents.join(", ")} ${item.status}.`
-          : `Collaboration tool ${item.tool} ${item.status}.`;
-      return { message: summary, phase: "investigating" };
-    }
-    case "exitedReviewMode":
-      return { message: "Reviewer finished.", phase: "finalizing" };
-    default:
-      return null;
-  }
-}
-
-/** @returns {TurnCaptureState} */
-function createTurnCaptureState(threadId, options = {}) {
-  let resolveCompletion;
-  let rejectCompletion;
-  const completion = new Promise((resolve, reject) => {
-    resolveCompletion = resolve;
-    rejectCompletion = reject;
-  });
-
-  return {
-    threadId,
-    rootThreadId: threadId,
-    threadIds: new Set([threadId]),
-    threadTurnIds: new Map(),
-    threadLabels: new Map(),
-    turnId: null,
-    bufferedNotifications: [],
-    completion,
-    resolveCompletion,
-    rejectCompletion,
-    finalTurn: null,
-    completed: false,
-    finalAnswerSeen: false,
-    pendingCollaborations: new Set(),
-    activeSubagentTurns: new Set(),
-    completionTimer: null,
-    lastAgentMessage: "",
-    reviewText: "",
-    reasoningSummary: [],
-    error: null,
-    messages: [],
-    fileChanges: [],
-    commandExecutions: [],
-    onProgress: options.onProgress ?? null
-  };
-}
-
-function clearCompletionTimer(state) {
-  if (state.completionTimer) {
-    clearTimeout(state.completionTimer);
-    state.completionTimer = null;
-  }
-}
-
-function completeTurn(state, turn = null, options = {}) {
-  if (state.completed) {
-    return;
-  }
-
-  clearCompletionTimer(state);
-  state.completed = true;
-
-  if (turn) {
-    state.finalTurn = turn;
-    if (!state.turnId) {
-      state.turnId = turn.id;
-    }
-  } else if (!state.finalTurn) {
-    state.finalTurn = {
-      id: state.turnId ?? "inferred-turn",
-      status: "completed"
-    };
-  }
-
-  if (options.inferred) {
-    emitProgress(state.onProgress, "Turn completion inferred after the main thread finished and subagent work drained.", "finalizing");
-  }
-
-  state.resolveCompletion(state);
-}
-
-function scheduleInferredCompletion(state) {
-  if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
-    return;
-  }
-
-  if (state.pendingCollaborations.size > 0 || state.activeSubagentTurns.size > 0) {
-    return;
-  }
-
-  clearCompletionTimer(state);
-  state.completionTimer = setTimeout(() => {
-    state.completionTimer = null;
-    if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
-      return;
-    }
-    if (state.pendingCollaborations.size > 0 || state.activeSubagentTurns.size > 0) {
-      return;
-    }
-    completeTurn(state, null, { inferred: true });
-  }, 250);
-  state.completionTimer.unref?.();
-}
-
-function belongsToTurn(state, message) {
-  const messageThreadId = extractThreadId(message);
-  if (!messageThreadId || !state.threadIds.has(messageThreadId)) {
-    return false;
-  }
-  const trackedTurnId = state.threadTurnIds.get(messageThreadId) ?? null;
-  const messageTurnId = extractTurnId(message);
-  return trackedTurnId === null || messageTurnId === null || messageTurnId === trackedTurnId;
-}
-
-function recordItem(state, item, lifecycle, threadId = null) {
-  if (item.type === "collabAgentToolCall") {
-    if (!threadId || threadId === state.threadId) {
-      if (lifecycle === "started" || item.status === "inProgress") {
-        state.pendingCollaborations.add(item.id);
-      } else if (lifecycle === "completed") {
-        state.pendingCollaborations.delete(item.id);
-        scheduleInferredCompletion(state);
-      }
-    }
-    for (const receiverThreadId of item.receiverThreadIds ?? []) {
-      registerThread(state, receiverThreadId);
-    }
-  }
-
-  if (item.type === "agentMessage") {
-    state.messages.push({
-      lifecycle,
-      phase: item.phase ?? null,
-      text: item.text ?? ""
+function spawnAgy(args, { cwd, env, input, timeoutMs, onPid } = {}) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const child = spawn(AGY_BINARY, args, {
+      cwd,
+      env: env ?? process.env,
+      detached: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
     });
-    if (item.text) {
-      if (!threadId || threadId === state.threadId) {
-        state.lastAgentMessage = item.text;
-        if (lifecycle === "completed" && item.phase === "final_answer") {
-          state.finalAnswerSeen = true;
-          scheduleInferredCompletion(state);
+
+    onPid?.(child.pid ?? null);
+
+    let timer = null;
+    if (timeoutMs && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // ignore
         }
-      }
-      if (lifecycle === "completed") {
-        const sourceLabel = labelForThread(state, threadId);
-        emitLogEvent(state.onProgress, {
-          message: sourceLabel ? `Subagent ${sourceLabel}: ${shorten(item.text, 96)}` : `Assistant message captured: ${shorten(item.text, 96)}`,
-          stderrMessage: null,
-          phase: item.phase === "final_answer" ? "finalizing" : null,
-          logTitle: sourceLabel ? `Subagent ${sourceLabel} message` : "Assistant message",
-          logBody: item.text
-        });
-      }
-    }
-    return;
-  }
-
-  if (item.type === "exitedReviewMode") {
-    state.reviewText = item.review ?? "";
-    if (lifecycle === "completed" && item.review) {
-      emitLogEvent(state.onProgress, {
-        message: "Review output captured.",
-        stderrMessage: null,
-        phase: "finalizing",
-        logTitle: "Review output",
-        logBody: item.review
-      });
-    }
-    return;
-  }
-
-  if (item.type === "reasoning" && lifecycle === "completed") {
-    const nextSections = extractReasoningSections(item.summary);
-    state.reasoningSummary = mergeReasoningSections(state.reasoningSummary, nextSections);
-    if (nextSections.length > 0) {
-      const sourceLabel = labelForThread(state, threadId);
-      emitLogEvent(state.onProgress, {
-        message: sourceLabel
-          ? `Subagent ${sourceLabel} reasoning: ${shorten(nextSections[0], 96)}`
-          : `Reasoning summary captured: ${shorten(nextSections[0], 96)}`,
-        stderrMessage: null,
-        logTitle: sourceLabel ? `Subagent ${sourceLabel} reasoning summary` : "Reasoning summary",
-        logBody: nextSections.map((section) => `- ${section}`).join("\n")
-      });
-    }
-    return;
-  }
-
-  if (item.type === "fileChange" && lifecycle === "completed") {
-    state.fileChanges.push(item);
-    return;
-  }
-
-  if (item.type === "commandExecution" && lifecycle === "completed") {
-    state.commandExecutions.push(item);
-  }
-}
-
-function applyTurnNotification(state, message) {
-  switch (message.method) {
-    case "thread/started":
-      registerThread(state, message.params.thread.id, {
-        threadName: message.params.thread.name,
-        name: message.params.thread.name,
-        agentNickname: message.params.thread.agentNickname,
-        agentRole: message.params.thread.agentRole
-      });
-      break;
-    case "thread/name/updated":
-      registerThread(state, message.params.threadId, {
-        threadName: message.params.threadName ?? null
-      });
-      break;
-    case "turn/started":
-      registerThread(state, message.params.threadId);
-      state.threadTurnIds.set(message.params.threadId, message.params.turn.id);
-      if ((message.params.threadId ?? null) !== state.threadId) {
-        state.activeSubagentTurns.add(message.params.threadId);
-      }
-      emitProgress(
-        state.onProgress,
-        `Turn started (${message.params.turn.id}).`,
-        "starting",
-        (message.params.threadId ?? null) === state.threadId
-          ? {
-              threadId: message.params.threadId ?? null,
-              turnId: message.params.turn.id ?? null
-            }
-          : {}
-      );
-      break;
-    case "item/started":
-      recordItem(state, message.params.item, "started", message.params.threadId ?? null);
-      {
-        const update = describeStartedItem(state, message.params.item);
-        emitProgress(state.onProgress, update?.message, update?.phase ?? null);
-      }
-      break;
-    case "item/completed":
-      recordItem(state, message.params.item, "completed", message.params.threadId ?? null);
-      {
-        const update = describeCompletedItem(state, message.params.item);
-        emitProgress(state.onProgress, update?.message, update?.phase ?? null);
-      }
-      break;
-    case "error":
-      state.error = message.params.error;
-      emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
-      break;
-    case "turn/completed":
-      if ((message.params.threadId ?? null) !== state.threadId) {
-        state.activeSubagentTurns.delete(message.params.threadId);
-        scheduleInferredCompletion(state);
-        break;
-      }
-      emitProgress(
-        state.onProgress,
-        `Turn ${message.params.turn.status === "completed" ? "completed" : message.params.turn.status}.`,
-        "finalizing"
-      );
-      completeTurn(state, message.params.turn);
-      break;
-    default:
-      break;
-  }
-}
-
-async function captureTurn(client, threadId, startRequest, options = {}) {
-  const state = createTurnCaptureState(threadId, options);
-  const previousHandler = client.notificationHandler;
-
-  client.setNotificationHandler((message) => {
-    if (!state.turnId) {
-      state.bufferedNotifications.push(message);
-      return;
+      }, timeoutMs);
+      timer.unref?.();
     }
 
-    if (message.method === "thread/started" || message.method === "thread/name/updated") {
-      applyTurnNotification(state, message);
-      return;
-    }
-
-    if (!belongsToTurn(state, message)) {
-        if (previousHandler) {
-          previousHandler(message);
-        }
-        return;
-    }
-
-    applyTurnNotification(state, message);
-  });
-
-  try {
-    const response = await startRequest();
-    options.onResponse?.(response, state);
-    state.turnId = response.turn?.id ?? null;
-    if (state.turnId) {
-      state.threadTurnIds.set(state.threadId, state.turnId);
-    }
-    for (const message of state.bufferedNotifications) {
-      if (belongsToTurn(state, message)) {
-        applyTurnNotification(state, message);
-      } else {
-        if (previousHandler) {
-          previousHandler(message);
-        }
-      }
-    }
-    state.bufferedNotifications.length = 0;
-
-    if (response.turn?.status && response.turn.status !== "inProgress") {
-      completeTurn(state, response.turn);
-    }
-
-    return await state.completion;
-  } finally {
-    clearCompletionTimer(state);
-    client.setNotificationHandler(previousHandler ?? null);
-  }
-}
-
-async function withAppServer(cwd, fn) {
-  let client = null;
-  try {
-    client = await CodexAppServerClient.connect(cwd);
-    const result = await fn(client);
-    await client.close();
-    return result;
-  } catch (error) {
-    const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
-    const shouldRetryDirect =
-      (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
-      (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
-
-    if (client) {
-      await client.close().catch(() => {});
-      client = null;
-    }
-
-    if (!shouldRetryDirect) {
-      throw error;
-    }
-
-    const directClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
-    try {
-      return await fn(directClient);
-    } finally {
-      await directClient.close();
-    }
-  }
-}
-
-async function startThread(client, cwd, options = {}) {
-  const response = await client.request("thread/start", buildThreadParams(cwd, options));
-  const threadId = response.thread.id;
-  if (options.threadName) {
-    try {
-      await client.request("thread/name/set", { threadId, name: options.threadName });
-    } catch (err) {
-      // Only suppress "unknown variant/method" errors from older CLI versions
-      // that don't support thread/name/set. Rethrow auth, network, or server errors.
-      const msg = String(err?.message ?? err ?? "");
-      if (!msg.includes("unknown variant") && !msg.includes("unknown method")) {
-        throw err;
-      }
-    }
-  }
-  return response;
-}
-
-async function resumeThread(client, threadId, cwd, options = {}) {
-  return client.request("thread/resume", buildResumeParams(threadId, cwd, options));
-}
-
-function buildResultStatus(turnState) {
-  return turnState.finalTurn?.status === "completed" ? 0 : 1;
-}
-
-const BUILTIN_PROVIDER_LABELS = new Map([
-  ["openai", "OpenAI"],
-  ["ollama", "Ollama"],
-  ["lmstudio", "LM Studio"]
-]);
-
-function normalizeProviderId(value) {
-  const providerId = typeof value === "string" ? value.trim() : "";
-  return providerId || null;
-}
-
-function formatProviderLabel(providerId, providerConfig = null) {
-  const configuredName = typeof providerConfig?.name === "string" ? providerConfig.name.trim() : "";
-  if (configuredName) {
-    return configuredName;
-  }
-  if (!providerId) {
-    return "The active provider";
-  }
-  return BUILTIN_PROVIDER_LABELS.get(providerId) ?? providerId;
-}
-
-function buildAuthStatus(fields = {}) {
-  return {
-    available: true,
-    loggedIn: false,
-    detail: "not authenticated",
-    source: "unknown",
-    authMethod: null,
-    verified: null,
-    requiresOpenaiAuth: null,
-    provider: null,
-    ...fields
-  };
-}
-
-function resolveProviderConfig(configResponse) {
-  const config = configResponse?.config;
-  if (!config || typeof config !== "object") {
-    return {
-      providerId: null,
-      providerConfig: null
-    };
-  }
-
-  const providerId = normalizeProviderId(config.model_provider);
-  const providers =
-    config.model_providers && typeof config.model_providers === "object" && !Array.isArray(config.model_providers)
-      ? config.model_providers
-      : null;
-  const providerConfig =
-    providerId && providers?.[providerId] && typeof providers[providerId] === "object" ? providers[providerId] : null;
-
-  return {
-    providerId,
-    providerConfig
-  };
-}
-
-function buildAppServerAuthStatus(accountResponse, configResponse) {
-  const account = accountResponse?.account ?? null;
-  const requiresOpenaiAuth =
-    typeof accountResponse?.requiresOpenaiAuth === "boolean" ? accountResponse.requiresOpenaiAuth : null;
-  const { providerId, providerConfig } = resolveProviderConfig(configResponse);
-  const providerLabel = formatProviderLabel(providerId, providerConfig);
-
-  if (account?.type === "chatgpt") {
-    const email = typeof account.email === "string" && account.email.trim() ? account.email.trim() : null;
-    return buildAuthStatus({
-      loggedIn: true,
-      detail: email ? `ChatGPT login active for ${email}` : "ChatGPT login active",
-      source: "app-server",
-      authMethod: "chatgpt",
-      verified: true,
-      requiresOpenaiAuth,
-      provider: providerId
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
     });
-  }
-
-  if (account?.type === "apiKey") {
-    return buildAuthStatus({
-      loggedIn: true,
-      detail: "API key configured (unverified)",
-      source: "app-server",
-      authMethod: "apiKey",
-      verified: false,
-      requiresOpenaiAuth,
-      provider: providerId
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
     });
-  }
 
-  if (requiresOpenaiAuth === false) {
-    return buildAuthStatus({
-      loggedIn: true,
-      detail: `${providerLabel} is configured and does not require OpenAI authentication`,
-      source: "app-server",
-      requiresOpenaiAuth,
-      provider: providerId
+    child.on("error", (error) => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      resolve({ status: -1, signal: null, stdout, stderr, error, timedOut: false });
     });
-  }
 
-  return buildAuthStatus({
-    loggedIn: false,
-    detail: `${providerLabel} requires OpenAI authentication`,
-    source: "app-server",
-    requiresOpenaiAuth,
-    provider: providerId
+    child.on("close", (code, signal) => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      resolve({
+        status: code ?? (signal ? -1 : 0),
+        signal: signal ?? null,
+        stdout,
+        stderr,
+        error: null,
+        timedOut
+      });
+    });
+
+    if (typeof input === "string") {
+      child.stdin.write(input);
+      child.stdin.end();
+    } else {
+      child.stdin.end();
+    }
   });
 }
 
-async function getCodexAuthStatusFromClient(client, cwd) {
-  try {
-    const accountResponse = await client.request("account/read", { refreshToken: false });
-    const configResponse = await client.request("config/read", {
-      includeLayers: false,
-      cwd
-    });
-
-    return buildAppServerAuthStatus(accountResponse, configResponse);
-  } catch (error) {
-    return buildAuthStatus({
-      loggedIn: false,
-      detail: error instanceof Error ? error.message : String(error),
-      source: "app-server"
-    });
+function buildAgyArgs(cwd, options = {}) {
+  const args = ["--print"];
+  if (options.printTimeout) {
+    args.push("--print-timeout", String(options.printTimeout));
+  } else {
+    args.push("--print-timeout", AGY_PRINT_TIMEOUT_DEFAULT);
   }
+  if (options.dangerouslySkipPermissions) {
+    args.push("--dangerously-skip-permissions");
+  }
+  if (cwd) {
+    args.push("--add-dir", cwd);
+  }
+  if (options.conversationId) {
+    args.push("--conversation", options.conversationId);
+  } else if (options.continueConversation) {
+    args.push("--continue");
+  }
+  return args;
 }
 
-export function getCodexAvailability(cwd) {
-  const versionStatus = binaryAvailable("codex", ["--version"], { cwd });
-  if (!versionStatus.available) {
-    return versionStatus;
-  }
-
-  const appServerStatus = binaryAvailable("codex", ["app-server", "--help"], { cwd });
-  if (!appServerStatus.available) {
-    return {
-      available: false,
-      detail: `${versionStatus.detail}; advanced runtime unavailable: ${appServerStatus.detail}`
-    };
-  }
-
-  return {
-    available: true,
-    detail: `${versionStatus.detail}; advanced runtime available`
-  };
+/**
+ * Check if `agy` is on PATH and responds to `--help`.
+ */
+export function getAgyAvailability(cwd) {
+  return binaryAvailable(AGY_BINARY, ["--help"], { cwd });
 }
 
-export function getSessionRuntimeStatus(env = process.env, cwd = process.cwd()) {
-  const endpoint = env?.[BROKER_ENDPOINT_ENV] ?? loadBrokerSession(cwd)?.endpoint ?? null;
-  if (endpoint) {
-    return {
-      mode: "shared",
-      label: "shared session",
-      detail: "This Claude session is configured to reuse one shared Codex runtime.",
-      endpoint
-    };
-  }
-
-  return {
-    mode: "direct",
-    label: "direct startup",
-    detail: "No shared Codex runtime is active yet. The first review or task command will start one on demand.",
-    endpoint: null
-  };
-}
-
-export async function getCodexAuthStatus(cwd, options = {}) {
-  const availability = getCodexAvailability(cwd);
+/**
+ * Best-effort auth probe. There is no public `agy whoami` or `agy auth status`
+ * subcommand. We send the smallest possible prompt and treat exit 0 with any
+ * non-empty stdout as "looks authenticated"; everything else is advisory.
+ *
+ * NOTE: this probe contacts Google's backend, so it consumes a turn. Callers
+ * should treat the result as advisory and avoid running it speculatively.
+ */
+export async function getAgyAuthStatus(cwd, options = {}) {
+  const availability = getAgyAvailability(cwd);
   if (!availability.available) {
     return {
       available: false,
       loggedIn: false,
       detail: availability.detail,
-      source: "availability",
-      authMethod: null,
-      verified: null,
-      requiresOpenaiAuth: null,
-      provider: null
+      source: "availability"
     };
   }
-
-  let client = null;
-  try {
-    client = await CodexAppServerClient.connect(cwd, {
-      env: options.env,
-      reuseExistingBroker: true
-    });
-    return await getCodexAuthStatusFromClient(client, cwd);
-  } catch (error) {
-    return buildAuthStatus({
-      loggedIn: false,
-      detail: error instanceof Error ? error.message : String(error),
-      source: "app-server"
-    });
-  } finally {
-    if (client) {
-      await client.close().catch(() => {});
-    }
+  if (options.skipNetworkProbe) {
+    return {
+      available: true,
+      loggedIn: null,
+      detail: "agy is installed (auth probe skipped)",
+      source: "availability"
+    };
   }
+  const result = await spawnAgy(buildAgyArgs(cwd, { printTimeout: "30s" }), {
+    cwd,
+    input: "respond with exactly the word OK",
+    timeoutMs: 45_000
+  });
+  const stdout = (result.stdout ?? "").trim();
+  const stderr = (result.stderr ?? "").trim();
+  if (result.status === 0 && stdout) {
+    return {
+      available: true,
+      loggedIn: true,
+      detail: "agy responded to a one-shot probe",
+      source: "print-probe"
+    };
+  }
+  // Heuristic: exit 0 with no stdout often means agy ran but the model
+  // refused/errored (e.g. region block, network). We cannot distinguish
+  // that from "not authenticated" without parsing internal logs, so we
+  // mark loggedIn as null (unknown) instead of false.
+  const detail =
+    stderr || stdout || (result.error ? result.error.message : `exit ${result.status}`);
+  return {
+    available: true,
+    loggedIn: result.status === 0 ? null : false,
+    detail: detail || "agy did not return output for the auth probe",
+    source: "print-probe"
+  };
 }
 
-export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
-  if (!threadId || !turnId) {
-    return {
-      attempted: false,
-      interrupted: false,
-      transport: null,
-      detail: "missing threadId or turnId"
-    };
-  }
-
-  const availability = getCodexAvailability(cwd);
-  if (!availability.available) {
-    return {
-      attempted: false,
-      interrupted: false,
-      transport: null,
-      detail: availability.detail
-    };
-  }
-
-  let client = null;
-  try {
-    client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
-    await client.request("turn/interrupt", { threadId, turnId });
-    return {
-      attempted: true,
-      interrupted: true,
-      transport: client.transport,
-      detail: `Interrupted ${turnId} on ${threadId}.`
-    };
-  } catch (error) {
-    return {
-      attempted: true,
-      interrupted: false,
-      transport: client?.transport ?? null,
-      detail: error instanceof Error ? error.message : String(error)
-    };
-  } finally {
-    await client?.close().catch(() => {});
-  }
+/**
+ * `agy` does not have a shared broker. Every turn is a fresh subprocess.
+ */
+export function getSessionRuntimeStatus() {
+  return {
+    mode: "direct",
+    label: "subprocess",
+    detail:
+      "Each task spawns a fresh agy subprocess. No shared runtime is reused across Claude sessions.",
+    endpoint: null
+  };
 }
 
-export async function runAppServerReview(cwd, options = {}) {
-  const availability = getCodexAvailability(cwd);
+/**
+ * Spawn one `agy --print` subprocess and capture stdout/stderr.
+ *
+ * Fields preserved from the old runAppServerTurn shape:
+ *  - status: 0 on success, non-zero on failure
+ *  - threadId: best-effort conversation UUID detected after the turn
+ *  - turnId: always null (no equivalent)
+ *  - finalMessage: stdout from agy
+ *  - reasoningSummary: always [] (no equivalent)
+ *  - fileChanges: always [] (no equivalent)
+ *  - commandExecutions: always [] (no equivalent)
+ *  - touchedFiles: always [] (we do not know what agy edited)
+ *  - stderr: cleaned stderr
+ *  - error: { message } when agy reports failure
+ */
+export async function runAgyTurn(cwd, options = {}) {
+  const availability = getAgyAvailability(cwd);
   if (!availability.available) {
-    throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
+    throw new Error(
+      "Antigravity CLI (`agy`) is not installed or is not on PATH. Install agy and sign in, then rerun `/antigravity:setup`."
+    );
   }
 
-  return withAppServer(cwd, async (client) => {
-    emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
-    const thread = await startThread(client, cwd, {
-      model: options.model,
-      sandbox: "read-only",
-      ephemeral: true,
-      threadName: options.threadName
-    });
-    const sourceThreadId = thread.thread.id;
-    emitProgress(options.onProgress, `Thread ready (${sourceThreadId}).`, "starting", {
-      threadId: sourceThreadId
-    });
-    const delivery = options.delivery ?? "inline";
+  const continueConversation = Boolean(options.resumeLast && !options.resumeThreadId);
+  const conversationId = options.resumeThreadId ?? null;
+  const prompt =
+    String(options.prompt ?? "").trim() || String(options.defaultPrompt ?? "").trim();
+  if (!prompt) {
+    throw new Error("A prompt is required for this agy run.");
+  }
 
-    const turnState = await captureTurn(
-      client,
-      sourceThreadId,
-      () =>
-        client.request("review/start", {
-          threadId: sourceThreadId,
-          delivery,
-          target: options.target
-        }),
-      {
-        onProgress: options.onProgress,
-        onResponse(response, state) {
-          if (response.reviewThreadId) {
-            state.threadIds.add(response.reviewThreadId);
-            if (delivery === "detached") {
-              state.threadId = response.reviewThreadId;
-            }
-          }
+  if (conversationId) {
+    emitProgress(options.onProgress, `Resuming conversation ${conversationId}.`, "starting");
+  } else if (continueConversation) {
+    emitProgress(options.onProgress, "Continuing the most recent agy conversation.", "starting");
+  } else {
+    emitProgress(options.onProgress, "Starting a new agy task.", "starting");
+  }
+
+  const beforeFile = snapshotLatestConversationFile();
+  const args = buildAgyArgs(cwd, {
+    printTimeout: options.printTimeout ?? AGY_PRINT_TIMEOUT_DEFAULT,
+    dangerouslySkipPermissions: Boolean(options.dangerouslySkipPermissions),
+    conversationId,
+    continueConversation
+  });
+
+  emitProgress(options.onProgress, `Invoking ${AGY_BINARY} ${args.join(" ")}.`, "running");
+
+  const result = await spawnAgy(args, {
+    cwd,
+    input: prompt,
+    timeoutMs: options.timeoutMs ?? null,
+    onPid: options.onPid
+  });
+
+  const stdout = result.stdout ?? "";
+  const stderr = cleanAgyStderr(result.stderr ?? "");
+  const detectedThreadId = conversationId ?? detectConversationIdAfter(beforeFile);
+
+  const error = result.error ?? null;
+  const turnFailed = result.timedOut || result.status !== 0 || Boolean(error);
+
+  if (turnFailed) {
+    const message = result.timedOut
+      ? "agy --print timed out before producing a response."
+      : error?.message
+        ? `agy exited with error: ${error.message}`
+        : stderr || `agy exited with non-zero status ${result.status}.`;
+    emitLogEvent(options.onProgress, {
+      message: "agy run failed.",
+      phase: "failed",
+      stderrMessage: message,
+      logTitle: "agy stderr",
+      logBody: stderr || message
+    });
+  } else if (stdout.trim()) {
+    emitLogEvent(options.onProgress, {
+      message: `Final message captured (${stdout.trim().length} chars).`,
+      phase: "finalizing",
+      logTitle: "agy final message",
+      logBody: stdout.trim()
+    });
+  } else {
+    emitProgress(
+      options.onProgress,
+      "agy exited successfully but produced no stdout.",
+      "finalizing"
+    );
+  }
+
+  return {
+    status: turnFailed ? (result.status === 0 ? 1 : result.status) : 0,
+    threadId: detectedThreadId,
+    turnId: null,
+    finalMessage: stdout,
+    reasoningSummary: [],
+    turn: turnFailed
+      ? { id: null, status: result.timedOut ? "timed_out" : "failed" }
+      : { id: null, status: "completed" },
+    error: turnFailed
+      ? {
+          message: result.timedOut
+            ? "agy --print timed out"
+            : error?.message ?? stderr ?? `exit ${result.status}`
         }
-      }
-    );
-
-    return {
-      status: buildResultStatus(turnState),
-      threadId: turnState.threadId,
-      sourceThreadId,
-      turnId: turnState.turnId,
-      reviewText: turnState.reviewText,
-      reasoningSummary: turnState.reasoningSummary,
-      turn: turnState.finalTurn,
-      error: turnState.error,
-      stderr: cleanCodexStderr(client.stderr)
-    };
-  });
+      : null,
+    stderr,
+    fileChanges: [],
+    touchedFiles: [],
+    commandExecutions: [],
+    timedOut: Boolean(result.timedOut)
+  };
 }
 
-export async function runAppServerTurn(cwd, options = {}) {
-  const availability = getCodexAvailability(cwd);
-  if (!availability.available) {
-    throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
-  }
-
-  return withAppServer(cwd, async (client) => {
-    let threadId;
-
-    if (options.resumeThreadId) {
-      emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
-      const response = await resumeThread(client, options.resumeThreadId, cwd, {
-        model: options.model,
-        sandbox: options.sandbox,
-        ephemeral: false
-      });
-      threadId = response.thread.id;
-    } else {
-      emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
-      const response = await startThread(client, cwd, {
-        model: options.model,
-        sandbox: options.sandbox,
-        ephemeral: options.persistThread ? false : true,
-        threadName: options.persistThread ? options.threadName : options.threadName ?? null
-      });
-      threadId = response.thread.id;
-    }
-
-    emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", {
-      threadId
-    });
-
-    const prompt = options.prompt?.trim() || options.defaultPrompt || "";
-    if (!prompt) {
-      throw new Error("A prompt is required for this Codex run.");
-    }
-
-    const turnState = await captureTurn(
-      client,
-      threadId,
-      () =>
-        client.request("turn/start", {
-          threadId,
-          input: buildTurnInput(prompt),
-          model: options.model ?? null,
-          effort: options.effort ?? null,
-          outputSchema: options.outputSchema ?? null
-        }),
-      { onProgress: options.onProgress }
-    );
-
-    return {
-      status: buildResultStatus(turnState),
-      threadId,
-      turnId: turnState.turnId,
-      finalMessage: turnState.lastAgentMessage,
-      reasoningSummary: turnState.reasoningSummary,
-      turn: turnState.finalTurn,
-      error: turnState.error,
-      stderr: cleanCodexStderr(client.stderr),
-      fileChanges: turnState.fileChanges,
-      touchedFiles: collectTouchedFiles(turnState.fileChanges),
-      commandExecutions: turnState.commandExecutions
-    };
+/**
+ * Run a review through agy. The companion script assembles the prompt
+ * from the existing `prompts/adversarial-review.md` template plus the
+ * git diff context, and forwards it here.
+ */
+export async function runAgyReview(cwd, options = {}) {
+  const result = await runAgyTurn(cwd, {
+    prompt: options.prompt,
+    printTimeout: options.printTimeout,
+    onProgress: options.onProgress,
+    onPid: options.onPid,
+    dangerouslySkipPermissions: options.dangerouslySkipPermissions
   });
+
+  return {
+    status: result.status,
+    threadId: result.threadId,
+    sourceThreadId: result.threadId,
+    turnId: null,
+    reviewText: result.finalMessage,
+    reasoningSummary: [],
+    turn: result.turn,
+    error: result.error,
+    stderr: result.stderr
+  };
 }
 
-export async function findLatestTaskThread(cwd) {
-  const availability = getCodexAvailability(cwd);
-  if (!availability.available) {
-    throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
+/**
+ * `agy` does not expose a conversation-list RPC, so we can only point at
+ * "the most recently modified conversation file in agy's storage dir",
+ * which is also what `agy --continue` would resume.
+ */
+export async function findLatestTaskThread(_cwd) {
+  const latest = snapshotLatestConversationFile();
+  if (!latest) {
+    return null;
   }
+  const id = deriveConversationIdFromFile(latest);
+  if (!id) {
+    return null;
+  }
+  return { id, name: null };
+}
 
-  return withAppServer(cwd, async (client) => {
-    const response = await client.request("thread/list", {
-      cwd,
-      limit: 20,
-      sortKey: "updated_at",
-      sourceKinds: ["appServer"],
-      searchTerm: TASK_THREAD_PREFIX
-    });
-
-    return (
-      response.data.find((thread) => typeof thread.name === "string" && thread.name.startsWith(TASK_THREAD_PREFIX)) ??
-      null
-    );
-  });
+/**
+ * Kept for API parity with the old broker. agy turns are killed by
+ * terminating the tracked subprocess PID — there is no out-of-band
+ * "interrupt this turn" RPC for an agy subprocess.
+ */
+export async function interruptAgyTurn(_cwd, { threadId, turnId } = {}) {
+  if (!threadId && !turnId) {
+    return {
+      attempted: false,
+      interrupted: false,
+      transport: null,
+      detail:
+        "agy turns are killed by terminating the tracked subprocess PID; no extra RPC needed."
+    };
+  }
+  return {
+    attempted: false,
+    interrupted: false,
+    transport: "subprocess",
+    detail:
+      "agy does not expose an RPC to interrupt a turn out-of-band; kill the subprocess PID instead."
+  };
 }
 
 export function buildPersistentTaskThreadName(prompt) {
   return buildTaskThreadName(prompt);
-}
-
-export function parseStructuredOutput(rawOutput, fallback = {}) {
-  if (!rawOutput) {
-    return {
-      parsed: null,
-      parseError: fallback.failureMessage ?? "Codex did not return a final structured message.",
-      rawOutput: rawOutput ?? "",
-      ...fallback
-    };
-  }
-
-  try {
-    return {
-      parsed: JSON.parse(rawOutput),
-      parseError: null,
-      rawOutput,
-      ...fallback
-    };
-  } catch (error) {
-    return {
-      parsed: null,
-      parseError: error.message,
-      rawOutput,
-      ...fallback
-    };
-  }
-}
-
-export function readOutputSchema(schemaPath) {
-  return readJsonFile(schemaPath);
 }
 
 export { DEFAULT_CONTINUE_PROMPT, TASK_THREAD_PREFIX };
