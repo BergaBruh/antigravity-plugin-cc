@@ -198,11 +198,31 @@ function spawnAgy(args, { cwd, env, input, timeoutMs, onPid } = {}) {
       });
     });
 
+    child.stdin.on("error", (err) => {
+      if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") {
+        // Child closed stdin early — this is normal (e.g. region-error, timeout, network drop).
+        // Ignore silently; the 'close' event will resolve the promise with the appropriate exit code.
+        return;
+      }
+      // Unexpected stdin error — log but do not throw (let exit code handle the failure).
+      process.stderr.write(`[antigravity] unexpected stdin error: ${err.message}\n`);
+    });
+
     if (typeof input === "string") {
-      child.stdin.write(input);
-      child.stdin.end();
+      try {
+        child.stdin.write(input);
+        child.stdin.end();
+      } catch (err) {
+        if (err.code !== "EPIPE" && err.code !== "ERR_STREAM_DESTROYED") {
+          process.stderr.write(`[antigravity] unexpected stdin write error: ${err.message}\n`);
+        }
+      }
     } else {
-      child.stdin.end();
+      try {
+        child.stdin.end();
+      } catch {
+        // ignore
+      }
     }
   });
 }
