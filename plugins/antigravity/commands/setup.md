@@ -1,37 +1,18 @@
 ---
-description: Check whether the local Codex CLI is ready and optionally toggle the stop-time review gate
-argument-hint: '[--enable-review-gate|--disable-review-gate]'
-allowed-tools: Bash(node:*), Bash(npm:*), AskUserQuestion
+description: Check whether the local Antigravity CLI (`agy`) is ready and optionally toggle the stop-time review gate
+argument-hint: '[--enable-review-gate|--disable-review-gate] [--probe-auth]'
+allowed-tools: Bash(node:*), Bash(agy:*), AskUserQuestion
 ---
 
 Run:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" setup --json $ARGUMENTS
+node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity-companion.mjs" setup --json $ARGUMENTS
 ```
-
-If the result says Codex is unavailable and npm is available:
-- Use `AskUserQuestion` exactly once to ask whether Claude should install Codex now.
-- Put the install option first and suffix it with `(Recommended)`.
-- Use these two options:
-  - `Install Codex (Recommended)`
-  - `Skip for now`
-- If the user chooses install, run:
-
-```bash
-npm install -g @openai/codex
-```
-
-- Then rerun:
-
-```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" setup --json $ARGUMENTS
-```
-
-If Codex is already installed or npm is unavailable:
-- Do not ask about installation.
 
 Output rules:
 - Present the final setup output to the user.
-- If installation was skipped, present the original setup output.
-- If Codex is installed but not authenticated, preserve the guidance to run `!codex login`.
+- If `agy` is not installed, point the user at the upstream install instructions at https://antigravity.google. There is no official `npm` package to offer to install, so do not offer that.
+- If `agy` is installed but the auth probe was skipped, mention that the user can rerun `/antigravity:setup --probe-auth` to verify sign-in (this consumes one turn against Google's backend).
+- If the auth probe reports the user is not signed in, instruct them to run `agy` once interactively in their own terminal and complete the OAuth flow.
+- If shell PATH configuration is missing after install, mention that `agy install` can configure shell paths.
