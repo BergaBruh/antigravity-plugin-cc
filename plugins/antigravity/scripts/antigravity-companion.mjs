@@ -164,10 +164,13 @@ async function buildSetupReport(cwd, actionsTaken = [], options = {}) {
     nextSteps.push("Optional: run `/antigravity:setup --enable-review-gate` to require a fresh review before stop. This gate is experimental and text-parsing-based.");
   }
 
+  // null means "probe not run" or "probe ran but result ambiguous (e.g. empty
+  // output, possible region restriction)". Neither case blocks ready — only an
+  // explicit loggedIn:false (exit non-zero) does.
   const ready =
     nodeStatus.available &&
     agyStatus.available &&
-    (authStatus.loggedIn === true || (!options.probeAuth && authStatus.loggedIn !== false));
+    authStatus.loggedIn !== false;
 
   return {
     ready,

@@ -280,11 +280,20 @@ export async function getAgyAuthStatus(cwd, options = {}) {
   // refused/errored (e.g. region block, network). We cannot distinguish
   // that from "not authenticated" without parsing internal logs, so we
   // mark loggedIn as null (unknown) instead of false.
+  if (result.status === 0) {
+    return {
+      available: true,
+      loggedIn: null,
+      detail:
+        "agy ran but returned empty output — possibly region-restricted, see ~/.gemini/antigravity-cli/cli.log",
+      source: "print-probe"
+    };
+  }
   const detail =
     stderr || stdout || (result.error ? result.error.message : `exit ${result.status}`);
   return {
     available: true,
-    loggedIn: result.status === 0 ? null : false,
+    loggedIn: false,
     detail: detail || "agy did not return output for the auth probe",
     source: "print-probe"
   };
