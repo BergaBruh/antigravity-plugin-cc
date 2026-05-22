@@ -1,21 +1,21 @@
 {
-  "name": "openai-codex",
+  "name": "google-antigravity",
   "owner": {
-    "name": "OpenAI"
+    "name": "Community"
   },
   "metadata": {
-    "description": "Codex plugins to use in Claude Code for delegation and code review.",
-    "version": "1.0.4"
+    "description": "Community-built Claude Code plugin that wraps the Antigravity CLI (`agy`) for delegation and code review.",
+    "version": "2.0.0"
   },
   "plugins": [
     {
-      "name": "codex",
-      "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.0.4",
+      "name": "antigravity",
+      "description": "Use the Antigravity CLI (`agy`) from Claude Code to review code or delegate tasks.",
+      "version": "2.0.0",
       "author": {
-        "name": "OpenAI"
+        "name": "Community"
       },
-      "source": "./plugins/codex"
+      "source": "./plugins/antigravity"
     }
   ]
 }

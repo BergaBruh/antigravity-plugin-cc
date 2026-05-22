@@ -1,4 +1,17 @@
-Copyright 2026 OpenAI
+Antigravity plugin for Claude Code
+Copyright 2026 The Antigravity Plugin Authors
+
+This product wraps the third-party Antigravity CLI (`agy`), maintained by
+Google. This plugin is a community-built integration and is not produced
+or endorsed by Google. Antigravity, the Antigravity CLI, and Gemini are
+trademarks of their respective owners.
+
+This project is derived from the OpenAI Codex plugin for Claude Code
+(https://github.com/openai/codex-plugin-cc), Copyright 2026 OpenAI,
+licensed under the Apache License, Version 2.0. The Codex-specific
+runtime (Codex app-server, JSON-RPC broker, structured-output schemas)
+has been removed; the remaining shared utilities are reused under the
+same license.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
