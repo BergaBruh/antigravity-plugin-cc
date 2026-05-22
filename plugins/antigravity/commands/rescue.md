@@ -44,6 +44,7 @@ Operating rules:
 - Leave `--resume` and `--fresh` in the forwarded request. The subagent handles that routing when it builds the `task` command.
 - If the helper reports that agy is missing or unauthenticated, stop and tell the user to run `/antigravity:setup`.
 - If the user did not supply a request, ask what agy should investigate or fix.
+- The subagent defaults to a read-only run. It adds `--write` only when the user's request explicitly contains words like "fix", "apply", "patch", "edit", "change the code", or "implement", or the user passed `--write` explicitly. Default read-only because Claude Code's security warnings on untrusted-marketplace plugins specifically flag `--write` invocations and may cause the subagent to skip the Bash call entirely.
 
 Notes:
 

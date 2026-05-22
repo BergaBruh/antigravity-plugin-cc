@@ -21,6 +21,7 @@ The Antigravity CLI (`agy`) only exposes a one-shot prompt interface (`agy --pri
 - No reasoning-summary panel and no model-reported file-change manifest.
 - The stop-time review gate is now **experimental**. It works by asking agy for a one-line `ALLOW:` / `BLOCK:` verdict and parsing that text. Text-only parsing is more fragile and more exposed to prompt injection than the Codex schema-based version. Treat it as best effort.
 - No `--model` or `--effort` knobs on `/antigravity:rescue` — agy does not currently surface those flags through `--print`.
+- Write-capable rescue runs (`--dangerously-skip-permissions` passed to agy) require explicit opt-in. The rescue subagent defaults to read-only because Claude Code's security model flags `--write` invocations from plugins installed via the local marketplace as untrusted, which can cause the Bash call to be skipped entirely. Use "fix", "apply", "patch", "implement", or explicitly pass `--write` to enable write mode.
 
 If you need any of the above, the Codex plugin is still a more featureful option for OpenAI users.
 

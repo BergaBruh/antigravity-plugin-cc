@@ -1,8 +1,12 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+
+import { writeFakeAgy } from "./fake-agy-fixture.mjs";
+import { run } from "./helpers.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "antigravity");
@@ -156,4 +160,52 @@ test("README documents the rewrite's scope reductions", () => {
   assert.match(readme, /No real-time streaming progress/i);
   assert.match(readme, /No structured JSON output/i);
   assert.match(readme, /experimental/i);
+});
+
+test("README documents write opt-in requirement", () => {
+  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  assert.match(readme, /Write-capable rescue runs.*require explicit opt-in/i);
+});
+
+test("setup without --probe-auth gives ready:true when agy is available (auth.loggedIn:null does not block)", () => {
+  const fake = writeFakeAgy();
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "agy-setup-test-"));
+  try {
+    const companionPath = path.join(ROOT, "plugins", "antigravity", "scripts", "antigravity-companion.mjs");
+    const result = run("node", [companionPath, "setup", "--json"], {
+      cwd: workspace,
+      env: { ...process.env, PATH: `${fake.dir}${path.delimiter}${process.env.PATH}` }
+    });
+    assert.equal(result.status, 0, `companion exited ${result.status}: ${result.stderr}`);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.ready, true, `expected ready:true, got ready:${report.ready}. auth: ${JSON.stringify(report.auth)}`);
+    assert.equal(report.auth.loggedIn, null);
+  } finally {
+    fs.rmSync(fake.dir, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("setup with --probe-auth and successful probe gives ready:true and loggedIn:true", () => {
+  const fake = writeFakeAgy();
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "agy-setup-probe-test-"));
+  try {
+    const companionPath = path.join(ROOT, "plugins", "antigravity", "scripts", "antigravity-companion.mjs");
+    const result = run("node", [companionPath, "setup", "--probe-auth", "--json"], {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        PATH: `${fake.dir}${path.delimiter}${process.env.PATH}`,
+        FAKE_AGY_REPLY: "OK"
+      }
+    });
+    assert.equal(result.status, 0, `companion exited ${result.status}: ${result.stderr}`);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.ready, true, `expected ready:true, got ready:${report.ready}. auth: ${JSON.stringify(report.auth)}`);
+    assert.equal(report.auth.loggedIn, true);
+    assert.match(report.auth.detail, /agy responded to a one-shot probe/);
+  } finally {
+    fs.rmSync(fake.dir, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
 });
