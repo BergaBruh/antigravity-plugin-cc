@@ -1,9 +1,138 @@
 import fs from "node:fs";
+import path from "node:path";
 
-import { getSessionRuntimeStatus } from "./antigravity.mjs";
-import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
+import { CONVERSATION_DIR_CANDIDATES, getSessionRuntimeStatus } from "./antigravity.mjs";
+import { getConfig, listJobs, readJobFile, resolveJobFile, upsertJob } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
+
+/**
+ * Returns true if the given PID is still alive, false if it is dead (ESRCH).
+ * Throws for unexpected errors (e.g. EPERM).
+ */
+function checkIfPidAlive(pid, options = {}) {
+  const killImpl = options.killImpl ?? process.kill.bind(process);
+  try {
+    killImpl(pid, 0);
+    return true;
+  } catch (err) {
+    if (err?.code === "ESRCH") {
+      return false;
+    }
+    // EPERM means the process exists but we cannot signal it — treat as alive.
+    if (err?.code === "EPERM") {
+      return true;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Scan conversation directories for .pb files whose mtime falls within the
+ * window [startedAtMs, nowMs]. Returns an array of UUID strings (filenames
+ * without the .pb extension).
+ */
+function findPbCandidates(startedAtMs, nowMs, conversationDirs) {
+  const candidates = [];
+  for (const dir of conversationDirs) {
+    if (!fs.existsSync(dir)) {
+      continue;
+    }
+    let entries;
+    try {
+      entries = fs.readdirSync(dir).filter((name) => name.endsWith(".pb"));
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      const filePath = path.join(dir, name);
+      let stat;
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        continue;
+      }
+      if (stat.mtimeMs >= startedAtMs && stat.mtimeMs <= nowMs) {
+        const uuid = path.basename(name, ".pb");
+        candidates.push(uuid);
+      }
+    }
+  }
+  return candidates;
+}
+
+/**
+ * Given a running job whose wrapper process has died, attempt to recover the
+ * agy conversation ID from nearby .pb files and return a patched job object
+ * with status "orphaned" and phase "wrapper-died".
+ *
+ * @param {object} job - The job record to check
+ * @param {string[]} conversationDirs - List of directories to scan
+ * @param {object} options - Injectable overrides (killImpl, nowMs)
+ * @returns {object|null} - Patched job object if orphaned, null if still alive
+ */
+export function detectOrphanedJob(job, conversationDirs, options = {}) {
+  if (job.status !== "running" || !Number.isFinite(job.pid)) {
+    return null;
+  }
+
+  let alive;
+  try {
+    alive = checkIfPidAlive(job.pid, options);
+  } catch {
+    // Cannot determine — leave the job alone.
+    return null;
+  }
+
+  if (alive) {
+    return null;
+  }
+
+  const nowMs = options.nowMs ?? Date.now();
+  const startedAtMs = job.startedAt ? Date.parse(job.startedAt) : (job.createdAt ? Date.parse(job.createdAt) : 0);
+  const validStartedAtMs = Number.isFinite(startedAtMs) ? startedAtMs : 0;
+
+  const candidates = findPbCandidates(validStartedAtMs, nowMs, conversationDirs);
+
+  const patch = {
+    ...job,
+    status: "orphaned",
+    phase: "wrapper-died",
+    completedAt: new Date(nowMs).toISOString(),
+    updatedAt: new Date(nowMs).toISOString()
+  };
+
+  if (candidates.length === 1) {
+    patch.threadId = candidates[0];
+    patch.recoveredThreadId = true;
+  } else if (candidates.length > 1) {
+    patch.threadId = job.threadId ?? null;
+    patch.possibleThreadIds = candidates;
+  } else {
+    patch.threadId = job.threadId ?? null;
+    patch.recoveryAttempted = true;
+  }
+
+  return patch;
+}
+
+/**
+ * Iterate over all running jobs, apply PID health-check, persist any
+ * orphaned jobs back to state, and return the updated jobs list.
+ */
+function applyOrphanDetection(workspaceRoot, jobs, conversationDirs, options = {}) {
+  let mutated = false;
+  const patched = jobs.map((job) => {
+    const orphaned = detectOrphanedJob(job, conversationDirs, options);
+    if (!orphaned) {
+      return job;
+    }
+    mutated = true;
+    upsertJob(workspaceRoot, orphaned);
+    return orphaned;
+  });
+  return mutated ? patched : jobs;
+}
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
@@ -133,18 +262,18 @@ function inferLegacyJobPhase(job, progressPreview = []) {
 
 export function enrichJob(job, options = {}) {
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
+  const isTerminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled" || job.status === "orphaned";
   const enriched = {
     ...job,
     kindLabel: getJobTypeLabel(job),
     progressPreview:
-      job.status === "queued" || job.status === "running" || job.status === "failed"
+      job.status === "queued" || job.status === "running" || job.status === "failed" || job.status === "orphaned"
         ? readJobProgressPreview(job.logFile, maxProgressLines)
         : [],
     elapsed: formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? null),
-    duration:
-      job.status === "completed" || job.status === "failed" || job.status === "cancelled"
-        ? formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? job.updatedAt)
-        : null
+    duration: isTerminal
+      ? formatElapsedDuration(job.startedAt ?? job.createdAt, job.completedAt ?? job.updatedAt)
+      : null
   };
 
   return {
@@ -186,7 +315,9 @@ function matchJobReference(jobs, reference, predicate = () => true) {
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);
-  const jobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
+  const conversationDirs = options.conversationDirs ?? CONVERSATION_DIR_CANDIDATES;
+  const rawJobs = sortJobsNewestFirst(filterJobsForCurrentSession(listJobs(workspaceRoot), options));
+  const jobs = applyOrphanDetection(workspaceRoot, rawJobs, conversationDirs, options);
   const maxJobs = options.maxJobs ?? DEFAULT_MAX_STATUS_JOBS;
   const maxProgressLines = options.maxProgressLines ?? DEFAULT_MAX_PROGRESS_LINES;
 
@@ -194,11 +325,15 @@ export function buildStatusSnapshot(cwd, options = {}) {
     .filter((job) => job.status === "queued" || job.status === "running")
     .map((job) => enrichJob(job, { maxProgressLines }));
 
-  const latestFinishedRaw = jobs.find((job) => job.status !== "queued" && job.status !== "running") ?? null;
+  const orphaned = jobs
+    .filter((job) => job.status === "orphaned")
+    .map((job) => enrichJob(job, { maxProgressLines }));
+
+  const latestFinishedRaw = jobs.find((job) => job.status !== "queued" && job.status !== "running" && job.status !== "orphaned") ?? null;
   const latestFinished = latestFinishedRaw ? enrichJob(latestFinishedRaw, { maxProgressLines }) : null;
 
   const recent = (options.all ? jobs : jobs.slice(0, maxJobs))
-    .filter((job) => job.status !== "queued" && job.status !== "running" && job.id !== latestFinished?.id)
+    .filter((job) => job.status !== "queued" && job.status !== "running" && job.status !== "orphaned" && job.id !== latestFinished?.id)
     .map((job) => enrichJob(job, { maxProgressLines }));
 
   return {
@@ -206,6 +341,7 @@ export function buildStatusSnapshot(cwd, options = {}) {
     config,
     sessionRuntime: getSessionRuntimeStatus(options.env, workspaceRoot),
     running,
+    orphaned,
     latestFinished,
     recent,
     needsReview: Boolean(config.stopReviewGate)
@@ -214,7 +350,9 @@ export function buildStatusSnapshot(cwd, options = {}) {
 
 export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  const conversationDirs = options.conversationDirs ?? CONVERSATION_DIR_CANDIDATES;
+  const rawJobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  const jobs = applyOrphanDetection(workspaceRoot, rawJobs, conversationDirs, options);
   const selected = matchJobReference(jobs, reference);
   if (!selected) {
     throw new Error(`No job found for "${reference}". Run /antigravity:status to inspect known jobs.`);

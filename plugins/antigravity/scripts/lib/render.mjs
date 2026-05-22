@@ -56,12 +56,27 @@ function pushJobDetails(lines, job, options = {}) {
   if (options.showDuration && job.duration) {
     lines.push(`  Duration: ${job.duration}`);
   }
-  if (job.threadId) {
-    lines.push(`  Agy conversation ID: ${job.threadId}`);
-  }
-  const resumeCommand = formatAgyResumeCommand(job);
-  if (resumeCommand) {
-    lines.push(`  Resume in agy: ${resumeCommand}`);
+  if (job.status === "orphaned") {
+    lines.push("  ⚠ wrapper died — partial result may be available");
+    if (job.threadId) {
+      lines.push(`  Agy conversation ID: ${job.threadId}`);
+      lines.push(`  Recover result: agy --conversation ${job.threadId} --print "Summarize previous answer"`);
+    } else if (job.possibleThreadIds?.length) {
+      lines.push("  Multiple candidate conversation IDs found:");
+      for (const id of job.possibleThreadIds) {
+        lines.push(`    agy --conversation ${id} --print "Summarize previous answer"`);
+      }
+    } else {
+      lines.push("  No conversation ID could be recovered automatically.");
+    }
+  } else {
+    if (job.threadId) {
+      lines.push(`  Agy conversation ID: ${job.threadId}`);
+    }
+    const resumeCommand = formatAgyResumeCommand(job);
+    if (resumeCommand) {
+      lines.push(`  Resume in agy: ${resumeCommand}`);
+    }
   }
   if (job.logFile && options.showLog) {
     lines.push(`  Log: ${job.logFile}`);
@@ -171,6 +186,17 @@ export function renderStatusReport(report) {
     for (const job of report.running) {
       pushJobDetails(lines, job, {
         showElapsed: true,
+        showLog: true
+      });
+    }
+    lines.push("");
+  }
+
+  if (report.orphaned?.length > 0) {
+    lines.push("Orphaned jobs (wrapper died before completing):");
+    for (const job of report.orphaned) {
+      pushJobDetails(lines, job, {
+        showDuration: true,
         showLog: true
       });
     }

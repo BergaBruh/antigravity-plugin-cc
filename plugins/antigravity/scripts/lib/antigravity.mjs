@@ -30,7 +30,7 @@ const DEFAULT_CONTINUE_PROMPT =
   "Continue from the current conversation state. Pick the next highest-value step and follow through until the task is resolved.";
 const AGY_BINARY = "agy";
 const AGY_PRINT_TIMEOUT_DEFAULT = "30m"; // generous; agy's own default is 5m.
-const CONVERSATION_DIR_CANDIDATES = [
+export const CONVERSATION_DIR_CANDIDATES = [
   path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations"),
   path.join(os.homedir(), ".agy", "conversations")
 ];
