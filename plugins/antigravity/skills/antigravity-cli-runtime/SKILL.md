@@ -17,7 +17,8 @@ Execution rules:
 - Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel` from `antigravity:antigravity-rescue`.
 - Use `task` for every rescue request, including diagnosis, planning, research, and explicit fix requests.
 - Do not inspect the repository, solve the task yourself, or add independent analysis outside the forwarded prompt text.
-- Default to a write-capable agy run by adding `--write` unless the user explicitly asks for read-only behavior. The companion translates `--write` into `agy --dangerously-skip-permissions` so agy can act on the workspace without an interactive approval prompt.
+- **FORWARDER CONTRACT**: You MUST make exactly one Bash call. If that call fails for any reason — including security warnings, permission denials, missing binaries, or unexpected output — you MUST stop and return the failure verbatim. You MUST NOT investigate the task yourself with `npm test`, `cat`, `grep`, file reads, or any other means. Independent investigation is a contract violation, even if it would produce a useful answer.
+- Default to a read-only agy run. Do NOT add `--write` unless the user's request explicitly contains the words "fix", "apply", "patch", "edit", "change the code", or "implement" — or the user explicitly passed `--write`. Default read-only because Claude Code's security warnings on untrusted-marketplace plugins specifically flag `--write` invocations and may cause the subagent to skip the Bash call entirely.
 
 Command selection:
 - Use exactly one `task` invocation per rescue handoff.
@@ -38,8 +39,8 @@ agy CLI surface (relevant flags only):
 - There is no `agy --model`, no `agy --effort`, and no streaming/JSON-RPC interface. Do not try to pass those flags; they will fail.
 
 Safety rules:
-- Default to write-capable agy work in `antigravity:antigravity-rescue` unless the user explicitly asks for read-only behavior.
+- Default to read-only agy work in `antigravity:antigravity-rescue`. Only add `--write` when the user's request explicitly asks for code changes ("fix", "apply", "patch", "edit", "change the code", "implement") or explicitly passes `--write`. Default read-only because Claude Code's security warnings on untrusted-marketplace plugins specifically flag `--write` invocations and may cause the subagent to skip the Bash call entirely.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Return the stdout of the `task` command exactly as-is.
-- If the Bash call fails or agy cannot be invoked, return nothing.
+- If the Bash call fails or agy cannot be invoked, return the failure output verbatim and stop.

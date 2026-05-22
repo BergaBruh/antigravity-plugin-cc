@@ -86,7 +86,10 @@ fi
 
 # Echo whatever was piped on stdin so tests can assert that the prompt
 # round-tripped through the subprocess.
-if [ -n "$FAKE_AGY_REPLY" ]; then
+# FAKE_AGY_EMPTY_REPLY=1 suppresses all output (exit 0 with empty stdout).
+if [ -n "$FAKE_AGY_EMPTY_REPLY" ]; then
+  true
+elif [ -n "$FAKE_AGY_REPLY" ]; then
   printf '%s' "$FAKE_AGY_REPLY"
 else
   cat

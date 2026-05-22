@@ -133,3 +133,46 @@ test("getSessionRuntimeStatus reports the direct/subprocess mode (no broker)", a
   assert.equal(status.label, "subprocess");
   assert.equal(status.endpoint, null);
 });
+
+test("getAgyAuthStatus returns loggedIn:true and human-readable detail when probe exits 0 with stdout", async () => {
+  process.env.FAKE_AGY_REPLY = "OK";
+  try {
+    await withFakeAgy(async ({ mod }) => {
+      const workspace = makeTempDir();
+      const result = await mod.getAgyAuthStatus(workspace);
+      assert.equal(result.loggedIn, true);
+      assert.match(result.detail, /agy responded to a one-shot probe/);
+    });
+  } finally {
+    delete process.env.FAKE_AGY_REPLY;
+  }
+});
+
+test("getAgyAuthStatus returns loggedIn:null and mentions region when probe exits 0 with empty stdout", async () => {
+  process.env.FAKE_AGY_EMPTY_REPLY = "1";
+  try {
+    await withFakeAgy(async ({ mod }) => {
+      const workspace = makeTempDir();
+      const result = await mod.getAgyAuthStatus(workspace);
+      assert.equal(result.loggedIn, null);
+      assert.match(result.detail, /region/i);
+      assert.match(result.detail, /cli\.log/);
+    });
+  } finally {
+    delete process.env.FAKE_AGY_EMPTY_REPLY;
+  }
+});
+
+test("getAgyAuthStatus returns loggedIn:false when probe exits non-zero", async () => {
+  process.env.FAKE_AGY_EXIT = "1";
+  try {
+    await withFakeAgy(async ({ mod }) => {
+      const workspace = makeTempDir();
+      const result = await mod.getAgyAuthStatus(workspace);
+      assert.equal(result.loggedIn, false);
+      assert.notEqual(result.detail, "exit 0");
+    });
+  } finally {
+    delete process.env.FAKE_AGY_EXIT;
+  }
+});
