@@ -1,59 +1,89 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderReviewResult, renderStoredJobResult } from "../plugins/codex/scripts/lib/render.mjs";
+import {
+  renderReviewResult,
+  renderSetupReport,
+  renderStoredJobResult,
+  renderTaskResult
+} from "../plugins/antigravity/scripts/lib/render.mjs";
 
-test("renderReviewResult degrades gracefully when JSON is missing required review fields", () => {
+test("renderReviewResult preserves agy stdout under an Antigravity review header", () => {
   const output = renderReviewResult(
     {
-      parsed: {
-        verdict: "approve",
-        summary: "Looks fine."
-      },
-      rawOutput: JSON.stringify({
-        verdict: "approve",
-        summary: "Looks fine."
-      }),
-      parseError: null
+      status: 0,
+      stdout: "Verdict: needs-attention\n- finding in src/app.js:12",
+      stderr: ""
     },
-    {
-      reviewLabel: "Adversarial Review",
-      targetLabel: "working tree diff"
-    }
+    { reviewLabel: "Adversarial Review", targetLabel: "working tree diff" }
   );
 
-  assert.match(output, /Codex returned JSON with an unexpected review shape\./);
-  assert.match(output, /Missing array `findings`\./);
-  assert.match(output, /Raw final message:/);
+  assert.match(output, /^# Antigravity Adversarial Review/);
+  assert.match(output, /Target: working tree diff/);
+  assert.match(output, /Verdict: needs-attention/);
+  assert.match(output, /finding in src\/app\.js:12/);
 });
 
-test("renderStoredJobResult prefers rendered output for structured review jobs", () => {
+test("renderReviewResult reports failure plainly when agy returns no stdout", () => {
+  const output = renderReviewResult(
+    {
+      status: 1,
+      stdout: "",
+      stderr: "boom"
+    },
+    { reviewLabel: "Review", targetLabel: "branch diff against main" }
+  );
+
+  assert.match(output, /agy review failed\./);
+  assert.match(output, /stderr:/);
+  assert.match(output, /boom/);
+});
+
+test("renderTaskResult passes raw output through unchanged", () => {
+  const output = renderTaskResult({ rawOutput: "hello world" });
+  assert.equal(output, "hello world\n");
+});
+
+test("renderTaskResult reports a fallback message when there is no raw output", () => {
+  const output = renderTaskResult({ rawOutput: "", failureMessage: "agy returned nothing" });
+  assert.equal(output, "agy returned nothing\n");
+});
+
+test("renderStoredJobResult points users at `agy --conversation <id>` when a thread is known", () => {
   const output = renderStoredJobResult(
     {
-      id: "review-123",
+      id: "task-123",
       status: "completed",
-      title: "Codex Adversarial Review",
-      jobClass: "review",
-      threadId: "thr_123"
+      title: "Antigravity Task",
+      jobClass: "task",
+      threadId: "abc-123-uuid"
     },
     {
-      threadId: "thr_123",
-      rendered: "# Codex Adversarial Review\n\nTarget: working tree diff\nVerdict: needs-attention\n",
-      result: {
-        result: {
-          verdict: "needs-attention",
-          summary: "One issue.",
-          findings: [],
-          next_steps: []
-        },
-        rawOutput:
-          '{"verdict":"needs-attention","summary":"One issue.","findings":[],"next_steps":[]}'
-      }
+      threadId: "abc-123-uuid",
+      result: { rawOutput: "Done.\n" }
     }
   );
 
-  assert.match(output, /^# Codex Adversarial Review/);
-  assert.doesNotMatch(output, /^\{/);
-  assert.match(output, /Codex session ID: thr_123/);
-  assert.match(output, /Resume in Codex: codex resume thr_123/);
+  assert.match(output, /^Done\./);
+  assert.match(output, /Agy conversation ID: abc-123-uuid/);
+  assert.match(output, /Resume in agy: agy --conversation abc-123-uuid/);
+});
+
+test("renderSetupReport surfaces the agy, auth, and review-gate lines", () => {
+  const output = renderSetupReport({
+    ready: false,
+    node: { detail: "v22.0.0" },
+    agy: { detail: "agy version 0.1" },
+    auth: { detail: "agy is installed (auth probe skipped)" },
+    sessionRuntime: { label: "subprocess" },
+    reviewGateEnabled: false,
+    actionsTaken: [],
+    nextSteps: ["Install the Antigravity CLI."]
+  });
+
+  assert.match(output, /# Antigravity Setup/);
+  assert.match(output, /- agy: agy version 0\.1/);
+  assert.match(output, /- auth: agy is installed/);
+  assert.match(output, /- review gate: disabled/);
+  assert.match(output, /Install the Antigravity CLI\./);
 });
