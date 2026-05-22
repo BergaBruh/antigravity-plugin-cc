@@ -43,6 +43,8 @@ async function withFakeAgy(fn) {
     } else {
       process.env.HOME = home;
     }
+    fs.rmSync(stagedHome, { recursive: true, force: true });
+    fs.rmSync(fake.dir, { recursive: true, force: true });
   }
 }
 
