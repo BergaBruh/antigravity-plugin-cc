@@ -1,7 +1,7 @@
 {
   "name": "google-antigravity",
   "owner": {
-    "name": "Community"
+    "name": "BergaBruh"
   },
   "metadata": {
     "description": "Community-built Claude Code plugin that wraps the Antigravity CLI (`agy`) for delegation and code review.",
@@ -13,7 +13,7 @@
       "description": "Use the Antigravity CLI (`agy`) from Claude Code to review code or delegate tasks.",
       "version": "2.0.0",
       "author": {
-        "name": "Community"
+        "name": "BergaBruh"
       },
       "source": "./plugins/antigravity"
     }
