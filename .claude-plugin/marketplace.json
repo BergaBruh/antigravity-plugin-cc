@@ -1,5 +1,5 @@
 {
-  "name": "google-antigravity",
+  "name": "antigravity-plugin-cc",
   "owner": {
     "name": "BergaBruh"
   },
@@ -10,12 +10,12 @@
   "plugins": [
     {
       "name": "antigravity",
-      "description": "Use the Antigravity CLI (`agy`) from Claude Code to review code or delegate tasks.",
+      "description": "Use the Antigravity CLI (`agy`) from Claude Code or OpenAI Codex to review code or delegate tasks.",
       "version": "2.0.0",
       "author": {
         "name": "BergaBruh"
       },
-      "source": "./plugins/antigravity"
+      "source": "./plugins/bergabruh"
     }
   ]
 }

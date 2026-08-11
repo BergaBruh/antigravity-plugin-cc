@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import {
   collectReviewContext,
   resolveReviewTarget
-} from "../plugins/antigravity/scripts/lib/git.mjs";
+} from "../plugins/bergabruh/scripts/lib/git.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 
 test("resolveReviewTarget prefers working tree when repo is dirty", () => {

@@ -28,7 +28,7 @@ async function withFakeAgy(fn) {
     // path resolution. Bust the loader cache via a query param.
     const stamp = Date.now() + Math.random();
     const mod = await import(
-      `../plugins/antigravity/scripts/lib/antigravity.mjs?stamp=${stamp}`
+      `../plugins/bergabruh/scripts/lib/antigravity.mjs?stamp=${stamp}`
     );
     await fn({ fake, conversationsDir, mod });
   } finally {
@@ -127,7 +127,7 @@ test("findLatestTaskThread returns the most recent .pb conversation in agy stora
 });
 
 test("getSessionRuntimeStatus reports the direct/subprocess mode (no broker)", async () => {
-  const mod = await import("../plugins/antigravity/scripts/lib/antigravity.mjs");
+  const mod = await import("../plugins/bergabruh/scripts/lib/antigravity.mjs");
   const status = mod.getSessionRuntimeStatus();
   assert.equal(status.mode, "direct");
   assert.equal(status.label, "subprocess");

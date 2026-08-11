@@ -1,9 +1,9 @@
 {
-  "name": "@community/antigravity-plugin-cc",
+  "name": "@bergabruh/antigravity-plugin-cc",
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Use the Antigravity CLI (agy) from Claude Code to review code or delegate tasks.",
+  "description": "Use the Antigravity CLI (agy) from Claude Code or OpenAI Codex for reviews and delegated tasks.",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=18.18.0"

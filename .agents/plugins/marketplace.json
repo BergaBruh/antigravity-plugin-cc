@@ -1,0 +1,20 @@
+{
+  "name": "antigravity-plugin-cc",
+  "interface": {
+    "displayName": "Antigravity Plugin for Codex"
+  },
+  "plugins": [
+    {
+      "name": "bergabruh",
+      "source": {
+        "source": "local",
+        "path": "./plugins/bergabruh"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

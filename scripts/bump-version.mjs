@@ -39,7 +39,19 @@ const TARGETS = [
     ]
   },
   {
-    file: "plugins/antigravity/.claude-plugin/plugin.json",
+    file: "plugins/bergabruh/.claude-plugin/plugin.json",
+    values: [
+      {
+        label: "version",
+        get: (json) => json.version,
+        set: (json, version) => {
+          json.version = version;
+        }
+      }
+    ]
+  },
+  {
+    file: "plugins/bergabruh/.codex-plugin/plugin.json",
     values: [
       {
         label: "version",

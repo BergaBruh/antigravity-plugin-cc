@@ -1,6 +1,6 @@
-# Antigravity plugin for Claude Code
+# Antigravity plugin for Claude Code and OpenAI Codex
 
-Wrap Google's Antigravity CLI (`agy`) from inside Claude Code for code reviews or to delegate tasks to agy.
+Wrap Google's Antigravity CLI (`agy`) from Claude Code or OpenAI Codex for reviews and delegated tasks.
 
 This is a community port of the original [OpenAI Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc). It is not produced or endorsed by Google or OpenAI.
 
@@ -31,7 +31,20 @@ If you need any of the above, the Codex plugin is still a more featureful option
 - **The Antigravity CLI (`agy`) installed and on PATH.** See https://antigravity.google for the latest install instructions.
 - **Node.js 18.18 or later.**
 
-## Install
+## Install in OpenAI Codex
+
+Codex uses the repository marketplace at `.agents/plugins/marketplace.json`:
+
+```bash
+codex plugin marketplace add <repository-root>
+codex plugin install bergabruh@antigravity-plugin-cc
+```
+
+It exposes MCP tools `setup`, `review`, `adversarial_review`, `task`, `status`, `result`, and `cancel`. Every tool requires an existing absolute `workspace` path; the bridge invokes the bundled companion without shell interpolation. Codex delegation is read-only: the bridge never forwards the companion's permission-bypass write flag.
+
+The Codex bundle is declarative (`.codex-plugin/plugin.json`) and starts its MCP server with the plugin-local path supplied by Codex. It does not depend on `CLAUDE_PLUGIN_ROOT` or Claude slash commands.
+
+## Install in Claude Code
 
 Add the marketplace in Claude Code (replace the path with the right git source for your fork or remote):
 
@@ -42,7 +55,7 @@ Add the marketplace in Claude Code (replace the path with the right git source f
 Install the plugin:
 
 ```bash
-/plugin install antigravity@google-antigravity
+/plugin install antigravity@antigravity-plugin-cc
 ```
 
 Reload plugins:
@@ -78,7 +91,48 @@ One simple first run is:
 /antigravity:result
 ```
 
-## Usage
+## Usage in OpenAI Codex
+
+Codex uses the MCP tools supplied by the `bergabruh` bundle; it does not use Claude slash commands. Every tool call must include `workspace`, an existing absolute path to the repository or directory you want Antigravity to inspect.
+
+Start by checking the local CLI:
+
+```text
+setup({ workspace: "/absolute/path/to/workspace" })
+```
+
+For an authentication check as well, pass `probeAuth: true`. The probe uses an Antigravity turn, so it is disabled by default.
+
+### Reviews
+
+Use `review` for an ordinary code review and `adversarial_review` to challenge a specific decision or risk area:
+
+```text
+review({ workspace: "/absolute/path/to/workspace" })
+review({ workspace: "/absolute/path/to/workspace", base: "main", scope: "branch" })
+adversarial_review({ workspace: "/absolute/path/to/workspace", focus: "Look for race conditions and question the retry design." })
+```
+
+Both review tools accept `base`, `scope` (`auto`, `working-tree`, or `branch`), and `background`. Set `background: true` to return the job ID immediately, then use `status`, `result`, or `cancel` with the same workspace.
+
+### Delegated tasks and jobs
+
+Use `task` to give Antigravity a prompt. You can continue the latest tracked task for that workspace with `resume: true`:
+
+```text
+task({ workspace: "/absolute/path/to/workspace", prompt: "Investigate why the tests started failing." })
+task({ workspace: "/absolute/path/to/workspace", prompt: "Continue with the smallest safe fix.", resume: true, background: true })
+status({ workspace: "/absolute/path/to/workspace" })
+result({ workspace: "/absolute/path/to/workspace", jobId: "task-abc123" })
+cancel({ workspace: "/absolute/path/to/workspace", jobId: "task-abc123" })
+```
+
+`status` also accepts `all: true` to show jobs from all Codex sessions. Omitting `jobId` from `result` or `cancel` selects the latest applicable job.
+
+> [!NOTE]
+> Codex delegation is read-only. The bridge does not expose or forward the companion's permission-bypass write flag, so use it for investigation, review, and recommendations rather than applying changes.
+
+## Usage in Claude Code
 
 ### `/antigravity:review`
 

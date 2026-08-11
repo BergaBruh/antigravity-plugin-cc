@@ -9,11 +9,19 @@ import { writeFakeAgy } from "./fake-agy-fixture.mjs";
 import { run } from "./helpers.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PLUGIN_ROOT = path.join(ROOT, "plugins", "antigravity");
+const PLUGIN_ROOT = path.join(ROOT, "plugins", "bergabruh");
 
 function read(relativePath) {
   return fs.readFileSync(path.join(PLUGIN_ROOT, relativePath), "utf8");
 }
+
+test("Claude compatibility keeps the antigravity plugin and command namespace", () => {
+  const manifest = JSON.parse(read(".claude-plugin/plugin.json"));
+  const marketplace = JSON.parse(fs.readFileSync(path.join(ROOT, ".claude-plugin", "marketplace.json"), "utf8"));
+
+  assert.equal(manifest.name, "antigravity");
+  assert.equal(marketplace.plugins[0].name, "antigravity");
+});
 
 test("review command uses AskUserQuestion and background Bash while staying review-only", () => {
   const source = read("commands/review.md");
@@ -171,7 +179,7 @@ test("setup without --probe-auth gives ready:true when agy is available (auth.lo
   const fake = writeFakeAgy();
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "agy-setup-test-"));
   try {
-    const companionPath = path.join(ROOT, "plugins", "antigravity", "scripts", "antigravity-companion.mjs");
+    const companionPath = path.join(ROOT, "plugins", "bergabruh", "scripts", "antigravity-companion.mjs");
     const result = run("node", [companionPath, "setup", "--json"], {
       cwd: workspace,
       env: { ...process.env, PATH: `${fake.dir}${path.delimiter}${process.env.PATH}` }
@@ -190,7 +198,7 @@ test("setup with --probe-auth and successful probe gives ready:true and loggedIn
   const fake = writeFakeAgy();
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "agy-setup-probe-test-"));
   try {
-    const companionPath = path.join(ROOT, "plugins", "antigravity", "scripts", "antigravity-companion.mjs");
+    const companionPath = path.join(ROOT, "plugins", "bergabruh", "scripts", "antigravity-companion.mjs");
     const result = run("node", [companionPath, "setup", "--probe-auth", "--json"], {
       cwd: workspace,
       env: {

@@ -6,7 +6,7 @@ import {
   renderSetupReport,
   renderStoredJobResult,
   renderTaskResult
-} from "../plugins/antigravity/scripts/lib/render.mjs";
+} from "../plugins/bergabruh/scripts/lib/render.mjs";
 
 test("renderReviewResult preserves agy stdout under an Antigravity review header", () => {
   const output = renderReviewResult(

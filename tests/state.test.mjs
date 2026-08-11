@@ -14,13 +14,15 @@ import {
   resolveStateFile,
   saveState,
   upsertJob
-} from "../plugins/antigravity/scripts/lib/state.mjs";
-import { detectOrphanedJob } from "../plugins/antigravity/scripts/lib/job-control.mjs";
+} from "../plugins/bergabruh/scripts/lib/state.mjs";
+import { detectOrphanedJob } from "../plugins/bergabruh/scripts/lib/job-control.mjs";
 
 test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   const workspace = makeTempDir();
   const previousPluginDataDir = process.env.CLAUDE_PLUGIN_DATA;
+  const previousCodexPluginDataDir = process.env.PLUGIN_DATA;
   delete process.env.CLAUDE_PLUGIN_DATA;
+  delete process.env.PLUGIN_DATA;
   try {
     const stateDir = resolveStateDir(workspace);
 
@@ -35,6 +37,11 @@ test("resolveStateDir uses a temp-backed per-workspace directory", () => {
     } else {
       process.env.CLAUDE_PLUGIN_DATA = previousPluginDataDir;
     }
+    if (previousCodexPluginDataDir == null) {
+      delete process.env.PLUGIN_DATA;
+    } else {
+      process.env.PLUGIN_DATA = previousCodexPluginDataDir;
+    }
   }
 });
 
@@ -42,7 +49,9 @@ test("resolveStateDir uses CLAUDE_PLUGIN_DATA when it is provided", () => {
   const workspace = makeTempDir();
   const pluginDataDir = makeTempDir();
   const previousPluginDataDir = process.env.CLAUDE_PLUGIN_DATA;
+  const previousCodexPluginDataDir = process.env.PLUGIN_DATA;
   process.env.CLAUDE_PLUGIN_DATA = pluginDataDir;
+  delete process.env.PLUGIN_DATA;
 
   try {
     const stateDir = resolveStateDir(workspace);
@@ -59,6 +68,27 @@ test("resolveStateDir uses CLAUDE_PLUGIN_DATA when it is provided", () => {
     } else {
       process.env.CLAUDE_PLUGIN_DATA = previousPluginDataDir;
     }
+    if (previousCodexPluginDataDir == null) delete process.env.PLUGIN_DATA;
+    else process.env.PLUGIN_DATA = previousCodexPluginDataDir;
+  }
+});
+
+test("resolveStateDir uses Codex PLUGIN_DATA when it is provided", () => {
+  const workspace = makeTempDir();
+  const pluginDataDir = makeTempDir();
+  const previousPluginDataDir = process.env.PLUGIN_DATA;
+  const previousClaudePluginDataDir = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.PLUGIN_DATA = pluginDataDir;
+  delete process.env.CLAUDE_PLUGIN_DATA;
+
+  try {
+    const stateDir = resolveStateDir(workspace);
+    assert.equal(stateDir.startsWith(path.join(pluginDataDir, "state")), true);
+  } finally {
+    if (previousPluginDataDir == null) delete process.env.PLUGIN_DATA;
+    else process.env.PLUGIN_DATA = previousPluginDataDir;
+    if (previousClaudePluginDataDir == null) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = previousClaudePluginDataDir;
   }
 });
 
