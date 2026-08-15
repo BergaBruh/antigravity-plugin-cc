@@ -149,6 +149,52 @@ test("hooks expose only the experimental Stop gate", () => {
   assert.doesNotMatch(source, /session-lifecycle-hook/);
 });
 
+test("stop review gate bounds agy before its process and hook deadlines", () => {
+  const hookSource = read("scripts/stop-review-gate-hook.mjs");
+  const hookConfig = JSON.parse(read("hooks/hooks.json"));
+
+  assert.match(hookSource, /STOP_REVIEW_AGY_PRINT_TIMEOUT = "2m"/);
+  assert.match(hookSource, /STOP_REVIEW_TIMEOUT_MS = 150 \* 1000/);
+  assert.match(hookSource, /"--print-timeout",\s*STOP_REVIEW_AGY_PRINT_TIMEOUT/);
+  assert.equal(hookConfig.hooks.Stop[0].hooks[0].timeout, 180);
+});
+
+test("stop review gate calls agy directly with its bounded print timeout", () => {
+  const fake = writeFakeAgy();
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "agy-stop-review-test-"));
+  const pluginData = fs.mkdtempSync(path.join(os.tmpdir(), "agy-stop-review-data-"));
+  const argsLog = path.join(workspace, "agy-args.log");
+  try {
+    const companionPath = path.join(ROOT, "plugins", "bergabruh", "scripts", "antigravity-companion.mjs");
+    const hookPath = path.join(ROOT, "plugins", "bergabruh", "scripts", "stop-review-gate-hook.mjs");
+    const env = {
+      ...process.env,
+      PATH: `${fake.dir}${path.delimiter}${process.env.PATH}`,
+      CLAUDE_PLUGIN_DATA: pluginData,
+      FAKE_AGY_ARGS_LOG: argsLog,
+      FAKE_AGY_REPLY: "ALLOW: no code changes to review"
+    };
+    const setup = run("node", [companionPath, "setup", "--enable-review-gate", "--json"], {
+      cwd: workspace,
+      env
+    });
+    assert.equal(setup.status, 0, `setup exited ${setup.status}: ${setup.stderr}`);
+
+    const result = run("node", [hookPath], {
+      cwd: workspace,
+      env,
+      input: JSON.stringify({ cwd: workspace, last_assistant_message: "No code changes." })
+    });
+
+    assert.equal(result.status, 0, `hook exited ${result.status}: ${result.stderr}`);
+    assert.match(fs.readFileSync(argsLog, "utf8"), /--print --print-timeout 2m/);
+  } finally {
+    fs.rmSync(fake.dir, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(pluginData, { recursive: true, force: true });
+  }
+});
+
 test("setup command points users at agy install / login (no npm offer)", () => {
   const setup = read("commands/setup.md");
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
