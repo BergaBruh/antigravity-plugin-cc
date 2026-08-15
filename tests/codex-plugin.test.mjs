@@ -65,6 +65,25 @@ test("Codex MCP bridge uses the plugin-local companion and exposes supported ope
   );
   assert.equal(replies[1].result.tools.every((tool) => tool.inputSchema.required.includes("workspace")), true);
   assert.equal(replies[1].result.tools.find((tool) => tool.name === "task").inputSchema.properties.write, undefined);
+  assert.deepEqual(replies[1].result.tools.find((tool) => tool.name === "status").annotations, {
+    readOnlyHint: true,
+    destructiveHint: false,
+    openWorldHint: false
+  });
+  assert.deepEqual(replies[1].result.tools.find((tool) => tool.name === "cancel").annotations, {
+    readOnlyHint: false,
+    destructiveHint: false,
+    openWorldHint: false
+  });
+  for (const name of ["setup", "review", "adversarial_review", "task"]) {
+    assert.deepEqual(replies[1].result.tools.find((tool) => tool.name === name).annotations, {
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true
+    });
+  }
+  assert.match(replies[1].result.tools.find((tool) => tool.name === "review").description, /external Antigravity service/);
+  assert.match(replies[1].result.tools.find((tool) => tool.name === "task").description, /workspace context/);
 });
 
 test("Codex MCP bridge rejects invalid workspaces and uses JSON-RPC error codes", () => {

@@ -11,47 +11,56 @@ const PLUGIN_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const COMPANION = path.join(PLUGIN_ROOT, "scripts", "antigravity-companion.mjs");
 const PROTOCOL_VERSION = "2025-03-26";
 
+const LOCAL_READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+const LOCAL_STATE_CHANGE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
+const EXTERNAL_ANTIGRAVITY_TURN = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
+
 const TOOLS = [
-  tool("setup", "Check whether Antigravity is installed and optionally probe authentication.", {
+  tool("setup", "Check whether Antigravity is installed. With probeAuth enabled, starts a network-backed authentication probe with Antigravity.", {
     probeAuth: booleanProperty("Run the network-backed authentication probe."),
     workspace: workspaceProperty()
-  }),
-  tool("review", "Run a code review with Antigravity.", {
+  }, [], EXTERNAL_ANTIGRAVITY_TURN),
+  tool("review", "Run a code review with Antigravity. This sends review instructions and selected workspace diff/context to the configured external Antigravity service.", {
     base: stringProperty("Optional Git base reference."),
     scope: enumProperty(["auto", "working-tree", "branch"], "Review target scope."),
     background: booleanProperty("Return immediately after starting the review."),
     workspace: workspaceProperty()
-  }),
-  tool("adversarial_review", "Run a focused adversarial code review with Antigravity.", {
+  }, [], EXTERNAL_ANTIGRAVITY_TURN),
+  tool("adversarial_review", "Run a focused adversarial code review with Antigravity. This sends the focus, review instructions, and selected workspace diff/context to the configured external Antigravity service.", {
     focus: stringProperty("Risk or design concern for the review."),
     base: stringProperty("Optional Git base reference."),
     scope: enumProperty(["auto", "working-tree", "branch"], "Review target scope."),
     background: booleanProperty("Return immediately after starting the review."),
     workspace: workspaceProperty()
-  }),
-  tool("task", "Delegate a task to Antigravity.", {
+  }, [], EXTERNAL_ANTIGRAVITY_TURN),
+  tool("task", "Delegate a task to Antigravity. This sends the task prompt and grants the configured external Antigravity service access to the selected workspace context.", {
     prompt: stringProperty("Task prompt for Antigravity."),
     resume: booleanProperty("Resume the latest tracked task."),
     background: booleanProperty("Return immediately after starting the task."),
     workspace: workspaceProperty()
-  }, ["prompt"]),
+  }, ["prompt"], EXTERNAL_ANTIGRAVITY_TURN),
   tool("status", "Show Antigravity jobs for the workspace.", {
     jobId: stringProperty("Optional job identifier."),
     all: booleanProperty("Show jobs from all sessions."),
     workspace: workspaceProperty()
-  }),
+  }, [], LOCAL_READ_ONLY),
   tool("result", "Show the stored result for an Antigravity job.", {
     jobId: stringProperty("Optional job identifier; defaults to the latest job."),
     workspace: workspaceProperty()
-  }),
+  }, [], LOCAL_READ_ONLY),
   tool("cancel", "Cancel an active Antigravity job.", {
     jobId: stringProperty("Optional job identifier; defaults to the latest active job."),
     workspace: workspaceProperty()
-  })
+  }, [], LOCAL_STATE_CHANGE)
 ];
 
-function tool(name, description, properties, required = []) {
-  return { name, description, inputSchema: { type: "object", properties, required: [...new Set([...required, "workspace"])], additionalProperties: false } };
+function tool(name, description, properties, required = [], annotations = LOCAL_READ_ONLY) {
+  return {
+    name,
+    description,
+    inputSchema: { type: "object", properties, required: [...new Set([...required, "workspace"])], additionalProperties: false },
+    annotations
+  };
 }
 
 function stringProperty(description) {

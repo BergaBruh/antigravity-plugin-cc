@@ -42,6 +42,8 @@ codex plugin install bergabruh@antigravity-plugin-cc
 
 It exposes MCP tools `setup`, `review`, `adversarial_review`, `task`, `status`, `result`, and `cancel`. Every tool requires an existing absolute `workspace` path; the bridge invokes the bundled companion without shell interpolation. Codex delegation is read-only: the bridge never forwards the companion's permission-bypass write flag.
 
+`review`, `adversarial_review`, and `task` start external Antigravity turns: they can send their prompt and the selected workspace's review context to Google's Antigravity service. `setup({ probeAuth: true })` also starts a network-backed Antigravity turn. These MCP tools are marked as external actions, so Codex may require an approval or Auto-review before they run; the plugin does not bypass that control. `status` and `result` only read locally stored job state.
+
 The Codex bundle is declarative (`.codex-plugin/plugin.json`) and starts its MCP server with the plugin-local path supplied by Codex. It does not depend on `CLAUDE_PLUGIN_ROOT` or Claude slash commands.
 
 ## Install in Claude Code
