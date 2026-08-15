@@ -30,6 +30,12 @@ if [ -n "$FAKE_AGY_SLEEP_MS" ]; then
   delay_ms="$FAKE_AGY_SLEEP_MS"
 fi
 
+# Record invocations when a test needs to assert agy flags. This is append-only
+# because the companion first probes the binary with --help.
+if [ -n "$FAKE_AGY_ARGS_LOG" ]; then
+  printf '%s\\n' "$*" >> "$FAKE_AGY_ARGS_LOG"
+fi
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --help)

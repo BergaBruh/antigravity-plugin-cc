@@ -22,7 +22,11 @@ import { sortJobsNewestFirst } from "./lib/job-control.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
-const STOP_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
+// The Stop gate only needs a compact ALLOW/BLOCK verdict. Run agy directly so
+// the local timeout targets the actual CLI process, then reserve 30 seconds
+// before Claude Code's hook deadline for cleanup and result collection.
+const STOP_REVIEW_AGY_PRINT_TIMEOUT = "2m";
+const STOP_REVIEW_TIMEOUT_MS = 150 * 1000;
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 
@@ -104,16 +108,18 @@ function parseStopReviewOutput(rawOutput) {
 }
 
 function runStopReview(cwd, input = {}) {
-  const scriptPath = path.join(SCRIPT_DIR, "antigravity-companion.mjs");
   const prompt = buildStopReviewPrompt(input);
-  const childEnv = {
-    ...process.env,
-    ...(input.session_id ? { [SESSION_ID_ENV]: input.session_id } : {})
-  };
-  const result = spawnSync(process.execPath, [scriptPath, "task", "--json", prompt], {
+  const result = spawnSync("agy", [
+    "--print",
+    "--print-timeout",
+    STOP_REVIEW_AGY_PRINT_TIMEOUT,
+    "--add-dir",
+    cwd
+  ], {
     cwd,
-    env: childEnv,
+    env: process.env,
     encoding: "utf8",
+    input: prompt,
     timeout: STOP_REVIEW_TIMEOUT_MS
   });
 
@@ -121,7 +127,7 @@ function runStopReview(cwd, input = {}) {
     return {
       ok: false,
       reason:
-        "The stop-time agy review timed out after 15 minutes. Run /antigravity:review --wait manually or disable the gate."
+        "The stop-time agy review timed out after 2 minutes 30 seconds. Run /antigravity:review --wait manually or disable the gate."
     };
   }
 
@@ -135,16 +141,7 @@ function runStopReview(cwd, input = {}) {
     };
   }
 
-  try {
-    const payload = JSON.parse(result.stdout);
-    return parseStopReviewOutput(payload?.rawOutput);
-  } catch {
-    return {
-      ok: false,
-      reason:
-        "The stop-time agy review returned invalid JSON. Run /antigravity:review --wait manually or disable the gate."
-    };
-  }
+  return parseStopReviewOutput(result.stdout);
 }
 
 function main() {
